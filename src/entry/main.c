@@ -18,9 +18,11 @@
 
 #include "multiboot.h"
 #include "monitor.h"
+#include "gdt.h"
 
 int hx_main(multiboot_t *mboot_ptr)
 {
+	init_gdt();
 	monitor_clear();
 	monitor_write_color("Hello, hurlex kernel!\n", rc_black, rc_green);
 	monitor_write_color("This is a simple OS kernel, just for study.\n", rc_black, rc_red);
