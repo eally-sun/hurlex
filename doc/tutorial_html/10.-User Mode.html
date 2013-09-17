@@ -1,0 +1,427 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><title>10.-User Mode</title><link rel='stylesheet' type='text/css' href='css/highlight.css'><link rel='stylesheet' type='text/css' href='css/layout.css'></head><body><div class="header">
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="index.html">Home</a> &raquo;
+	 	JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+
+<div class='index'>
+<a href='1.-Environment setup.html'>1. Environment setup</a><br/><a href='2.-Genesis.html'>2. Genesis</a><br/><a href='3.-The Screen.html'>3. The Screen</a><br/><a href='4.-The GDT and IDT.html'>4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html'>5. IRQs and the PIT</a><br/><a href='6.-Paging.html'>6. Paging</a><br/><a href='7.-The Heap.html'>7. The Heap</a><br/><a href='8.-The VFS and the initrd.html'>8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html'>9. Multitasking</a><br/><a href='10.-User Mode.html' class='selected' >10. User Mode</a><br/></div>
+<h1>10. User mode (and syscalls)</h1>
+<p><div class='image_frame'><img src='images/rings.png' /><br/><span class='image_caption'>The x86's protection system.</span></div>
+Your kernel, at the moment, is running with the processor in "kernel mode", or "supervisor mode". Kernel mode makes available certain instructions that would usually be denied a user program - like being able to disable interrupts, or halt the processor.
+</p>
+<p>Once you start running user programs, you'll want to make the jump from kernel mode to user mode, to restrict what instructions are available. You can also restrict read or write access to areas of memory. This is often used to 'hide' the kernel's code and data from user programs.
+</p>
+<p></p><h2>10.1. Switching to user mode</h2>
+<p>The x86 is strange in that there is no direct way to switch to user mode. The only way one can reach user mode is to return from an exception that <i>began</i> in user mode. The only method of getting there in the first place is to set up the stack as if an exception in user mode had occurred, then executing an exception return instruction (IRET).
+</p>
+<p>The IRET instruction expects, when executed, the stack to have the following contents (starting from the stack pointer - the lowermost address upwards):
+</p>
+<p><div class='image_frame'><img src='images/iret.png' /><br/><span class='image_caption'>Stack prior to IRET.</span></div>
+<ul>
+<li>The instruction to continue execution at - the value of EIP.</li>
+<li>The code segment selector to change to.</li>
+<li>The value of the EFLAGS register to load.</li>
+<li>The stack pointer to load.</li>
+<li>The stack segment selector to change to.</li>
+</ul>
+</p>
+<p>The EIP, EFLAGS and ESP register values should be easy to work out, but the CS and SS values are slightly more difficult.
+</p>
+<p>When we set up our GDT we set up 5 selectors - the NULL selector, a code segment selector for kernel mode, a data segment selector for kernel mode, a code segment selector for user mode, and a data segment selector for user mode.
+</p>
+<p>They are all 8 bytes in size, so the selector indices are:
+<ul>
+<li>0x00: Null descriptor</li>
+<li>0x08: Kernel code segment</li>
+<li>0x10: Kernel data segment</li>
+<li>0x18: User code segment</li>
+<li>0x20: User data segment</li>
+</ul>
+</p>
+<p>We're currently using selectors 0x08 and 0x10 - for user mode we want to use selectors 0x18 and 0x20. However, it's not quite that straightforward. Because the selectors are all 8 bytes in size, the two least significant bits of the selector will always be zero. Intel use these two bits to represent the RPL - the <i>Requested Privilege Level</i>. These have currently been zero because we were operating in ring 0, but now that we want to move to ring three we must set them to '3'. If you wish to know more about the RPL and segmentation in general, you should read the intel manuals. There is far too much information for me to explain everything here.
+</p>
+<p>So, this means that our code segment selector will be (0x18 | 0x3 = 0x1b), and our data segment selector will be (0x20 | 0x3 = 0x23).
+</p>
+<p></p><h3>10.1.1. task.c</h3>
+<p>This function should go in your task.c. We'll call it from main.c.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>switch_to_user_mode</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Set up a stack structure for switching to user mode.</span><br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"&nbsp;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cli;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;$0x23,&nbsp;%ax;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;%ax,&nbsp;%ds;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;%ax,&nbsp;%es;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;%ax,&nbsp;%fs;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;%ax,&nbsp;%gs;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;%esp,&nbsp;%eax;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pushl&nbsp;$0x23;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pushl&nbsp;%eax;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pushf;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pushl&nbsp;$0x1B;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;push&nbsp;$1f;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;iret;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;1:&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"</span>);<br/>
+}
+</div>
+</p>
+<p>This code firstly disables interrupts, as we're working on a critical section of code. It then sets the ds, es, fs and gs segment selectors to our user mode data selector - 0x23.
+</p>
+<p>Our aim is to return from the switch_to_user_mode() function in user mode, so to do that we need to not change the stack pointer. The next line saves the stack pointer in EAX, for reference later. We push our stack segment selector value (0x23), then push the value that we want the stack pointer to have after the IRET. This is the value of ESP before we changed anything on the stack (stored in EAX).
+</p>
+<p>The pushf instruction pushes the current value of EFLAGS - we then push the CS selector value (0x1b).
+</p>
+<p>The next statement is a little special, and can confuse some people who are not used to AS syntax. we push the value of $1f onto the stack. $1f means "the address of the next label '1:', searching forward". Read the GNU AS manual for more information, but numeric symbols are treated differently by it - you can have as many definitions of "1:", "2:" etc as you like.
+</p>
+<p>After this we execute our IRET, and hopefully we should now be executing code at the "1:" line with the same stack, in user mode.
+</p>
+<p></p><h3>10.1.2. Something to watch out for</h3>
+<p>You may notice that we disabled interrupts before starting the mode switch. A problem now occurs - how do we re-enable interrupts? You'll find that executing <i>sti</i> in user mode will cause a general protection fault, however if we enable interrupts before we do our IRET, we may be interrupted at a bad time.
+</p>
+<p>A solution presents itself if you know how the <i>sti</i> and <i>cli</i> instructions work - they just set the 'IF' flag in EFLAGS. <a href='http://en.wikipedia.org/wiki/EFLAGS'>Wikipedia</a> tells us that the IF flag has a mask of 0x200, so what you <i>could</i> do, is insert these lines just after the 'pushf' in the asm above:
+</p>
+<p><div class='code'>
+<span class='code_operator'>pop</span>&nbsp;%eax&nbsp;<span class='code_comment'>; Get EFLAGS back into EAX. The only way to read EFLAGS is to pushf then pop.</span><br/>
+or&nbsp;%eax,&nbsp;$0x200&nbsp;<span class='code_comment'>; Set the IF flag.</span><br/>
+<span class='code_operator'>push</span>&nbsp;%eax&nbsp;<span class='code_comment'>; Push the new EFLAGS value back onto the stack.</span>
+</div>
+</p>
+<p>This solution means that interrupts get reenabled atomically as IRET is executing - perfectly safe.
+</p>
+<p></p><h2>10.2. System calls</h2>
+<p>Code running in user mode cannot run any code which is located in or accesses a supervisor-only area of memory (see the page table entry flags) or any code which uses privileged instructions such as <i>hlt</i>. Most kernels therefore provide an interface by which common functions can be executed. A call to the kernel through this interface is called a "system call".
+</p>
+<p>The historical, easy, and still widely used way to implement system calls on x86 is to use software interrupts. The user program will set up one register to indicate which system function it would like to execute, then set up parameters in others. It would then execute a software interrupt to a specific vector - linux uses 0x80. The software interrupt causes a mode change to ring 0 - the kernel will have a handler for this interrupt vector, and dispatch the system call appropriately.
+</p>
+<p>One thing that is important to note is that the kernel, when executing interrupt handling code, requires a valid stack to work with. If it doesn't have one, the processor will double fault (and then eventually triple fault because the double fault handler needs a valid stack too!). This would obviously be a very easy way for a malicious user to bring down your system, so it is normal practice to, on mode change from ring 3 to ring 0, switch to a new stack designed solely for use by the kernel, and which is guaranteed to be valid.
+</p>
+<p>Obviously, if you want your kernel to be preemptible (i.e. you want to be able to task switch while executing code inside the kernel) you'll need one of these kernel stacks per task, or you'll end up overwriting one task's data when executing another task!
+</p>
+<p></p><h3>10.2.1. The task state segment</h3>
+<p>The X86 architecture has support for hardware-assisted task switching by way of a list of Task State Segments (TSS). In this tutorial set we have (like BSD, linux and most x86 operating systems) decided against using it and opted instead for a software based solution. The main reason for this is that hardware task switching is actually not much faster than software, and software task switching is far more portable between platforms.
+</p>
+<p>With that said, the way the x86 architecture is designed we have no choice but to use at least one TSS. This is because when a program in user mode (ring 3) executes a system call (software interrupt) the processor automatically looks in the current TSS and sets the stack segment (SS) and stack pointer (ESP) to what it finds in the SS0 and ESP0 fields ('0' because it's switching to ring 0) - in essence this switches from the user's stack to your kernel stack.
+</p>
+<p>Normal practice when implementing software task switching is just to have one TSS, and update the ESP0 field of it whenever a task switch takes place - this is the minimum work neccessary to allow system calls to work properly.
+</p>
+<p></p><h4>10.2.1.1. descriptor_tables.h</h4>
+<p>We'll need to add a TSS entry structure into the descriptor_tables header file:
+</p>
+<p><div class='code'>
+<span class='code_comment'>// A struct describing a Task State Segment.</span><br/>
+<span class='code_primitive'>struct</span>&nbsp;tss_entry_struct<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;prev_tss;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The previous TSS - if we used hardware task switching this would form a linked list.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;esp0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The stack pointer to load when we change to kernel mode.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ss0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The stack segment to load when we change to kernel mode.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;esp1;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Unused...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ss1;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;esp2;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ss2;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;cr3;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;eip;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;eflags;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;eax;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ecx;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;edx;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ebx;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;esp;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ebp;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;esi;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;edi;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;es;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The value to load into ES when we change to kernel mode.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;cs;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The value to load into CS when we change to kernel mode.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ss;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The value to load into SS when we change to kernel mode.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ds;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The value to load into DS when we change to kernel mode.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;fs;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The value to load into FS when we change to kernel mode.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;gs;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The value to load into GS when we change to kernel mode.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ldt;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Unused...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;trap;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;iomap_base;<br/>
+}&nbsp;<span class='code_function'>__attribute__</span>((packed));<br/>
+<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;tss_entry_struct&nbsp;<span class='code_typedef'>tss_entry_t</span>;
+</div>
+</p>
+<p></p><h4>10.2.1.2. descriptor_tables.c</h4>
+<p>We'll also need code to initialise the TSS. The TSS is actually stored as a pointer inside the GDT, so we'll need another GDT entry too.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Lets us access our ASM functions from our C code.</span><br/>
+...<br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>tss_flush</span>();<br/>
+<br/>
+<span class='code_comment'>// Internal function prototypes.</span><br/>
+...<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>write_tss</span>(<span class='code_primitive'>s32int</span>,<span class='code_primitive'>u16int</span>,<span class='code_primitive'>u32int</span>);<br/>
+...<br/>
+<br/>
+<span class='code_typedef'>tss_entry_t</span>&nbsp;tss_entry;<br/>
+<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_gdt</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;gdt_ptr.limit&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_function'>sizeof</span>(<span class='code_typedef'>gdt_entry_t</span>)&nbsp;<span class='code_operator'>*</span>&nbsp;<span class='code_integer'>6</span>)&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;gdt_ptr.base&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)<span class='code_operator'>&</span>gdt_entries;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Null segment</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_integer'>1</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>xFFFFFFFF,&nbsp;<span class='code_integer'>0</span>x9A,&nbsp;<span class='code_integer'>0</span>xCF);&nbsp;<span class='code_comment'>// Code segment</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_integer'>2</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>xFFFFFFFF,&nbsp;<span class='code_integer'>0</span>x92,&nbsp;<span class='code_integer'>0</span>xCF);&nbsp;<span class='code_comment'>// Data segment</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_integer'>3</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>xFFFFFFFF,&nbsp;<span class='code_integer'>0</span>xFA,&nbsp;<span class='code_integer'>0</span>xCF);&nbsp;<span class='code_comment'>// User mode code segment</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_integer'>4</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>xFFFFFFFF,&nbsp;<span class='code_integer'>0</span>xF2,&nbsp;<span class='code_integer'>0</span>xCF);&nbsp;<span class='code_comment'>// User mode data segment</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>write_tss</span>(<span class='code_integer'>5</span>,&nbsp;<span class='code_integer'>0</span>x10,&nbsp;<span class='code_integer'>0</span>x0);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_flush</span>((<span class='code_primitive'>u32int</span>)<span class='code_operator'>&</span>gdt_ptr);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>tss_flush</span>();<br/>
+}<br/>
+<br/>
+<span class='code_comment'>// Initialise our task state segment structure.</span><br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>write_tss</span>(<span class='code_primitive'>s32int</span>&nbsp;num,&nbsp;<span class='code_primitive'>u16int</span>&nbsp;ss0,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;esp0)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Firstly, let's compute the base and limit of our entry into the GDT.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;base&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)&nbsp;<span class='code_operator'>&</span>tss_entry;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;limit&nbsp;<span class='code_operator'>=</span>&nbsp;base&nbsp;<span class='code_operator'>+</span>&nbsp;<span class='code_function'>sizeof</span>(tss_entry);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Now, add our TSS descriptor's address to the GDT.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(num,&nbsp;base,&nbsp;limit,&nbsp;<span class='code_integer'>0</span>xE9,&nbsp;<span class='code_integer'>0</span>x00);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Ensure the descriptor is initially zero.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(<span class='code_operator'>&</span>tss_entry,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_function'>sizeof</span>(tss_entry));<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;tss_entry.ss0&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;ss0;&nbsp;&nbsp;<span class='code_comment'>// Set the kernel stack segment.</span><br/>
+&nbsp;&nbsp;&nbsp;tss_entry.esp0&nbsp;<span class='code_operator'>=</span>&nbsp;esp0;&nbsp;<span class='code_comment'>// Set the kernel stack pointer.</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Here we set the cs, ss, ds, es, fs and gs entries in the TSS. These specify what</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// segments should be loaded when the processor switches to kernel mode. Therefore</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// they are just our normal kernel code/data segments - 0x08 and 0x10 respectively,</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// but with the last two bits set, making 0x0b and 0x13. The setting of these bits</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// sets the RPL (requested privilege level) to 3, meaning that this TSS can be used</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// to switch to kernel mode from ring 3.</span><br/>
+&nbsp;&nbsp;&nbsp;tss_entry.cs&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x0b;<br/>
+&nbsp;&nbsp;&nbsp;tss_entry.ss&nbsp;<span class='code_operator'>=</span>&nbsp;tss_entry.ds&nbsp;<span class='code_operator'>=</span>&nbsp;tss_entry.es&nbsp;<span class='code_operator'>=</span>&nbsp;tss_entry.fs&nbsp;<span class='code_operator'>=</span>&nbsp;tss_entry.gs&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x13;<br/>
+}
+</div>
+</p>
+<p>Well define tss_flush in a second. We'll also need a function to update the TSS entry when we change tasks, so it holds the address of the correct kernel stack;
+</p>
+<p><div class='code'>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>set_kernel_stack</span>(<span class='code_primitive'>u32int</span>&nbsp;stack)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;tss_entry.esp0&nbsp;<span class='code_operator'>=</span>&nbsp;stack;<br/>
+}
+</div>
+</p>
+<p></p><h4>10.2.1.3. gdt.s</h4>
+<p>Here we define our tss_flush function. In it, we tell the processor where to find our TSS within the GDT.
+</p>
+<p><div class='code'>
+[GLOBAL&nbsp;tss_flush]&nbsp;&nbsp;&nbsp;&nbsp;;&nbsp;Allows&nbsp;our&nbsp;C&nbsp;code&nbsp;to&nbsp;call&nbsp;tss_flush().<br/>
+tss_flush:<br/>
+&nbsp;&nbsp;&nbsp;mov&nbsp;ax,&nbsp;0x2B&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;;&nbsp;Load&nbsp;the&nbsp;index&nbsp;of&nbsp;our&nbsp;TSS&nbsp;structure&nbsp;-&nbsp;The&nbsp;index&nbsp;is<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;;&nbsp;0x28,&nbsp;as&nbsp;it&nbsp;is&nbsp;the&nbsp;5th&nbsp;selector&nbsp;and&nbsp;each&nbsp;is&nbsp;8&nbsp;bytes<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;;&nbsp;long,&nbsp;but&nbsp;we&nbsp;set&nbsp;the&nbsp;bottom&nbsp;two&nbsp;bits&nbsp;(making&nbsp;0x2B)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;;&nbsp;so&nbsp;that&nbsp;it&nbsp;has&nbsp;an&nbsp;RPL&nbsp;of&nbsp;3,&nbsp;not&nbsp;zero.<br/>
+&nbsp;&nbsp;&nbsp;ltr&nbsp;ax&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;;&nbsp;Load&nbsp;0x2B&nbsp;into&nbsp;the&nbsp;task&nbsp;state&nbsp;register.<br/>
+&nbsp;&nbsp;&nbsp;ret
+</div>
+</p>
+<p>Notice that we have to specify an RPL, just like when we switched to user mode.
+</p>
+<p></p><h3>10.2.2. The system call interface</h3>
+<p>We're going to create a syscall interface similar to Linux's, in that it uses interrupt vector 0x80. Our defined interrupt handlers don't currently reach that high, so we'll have to add another - a "ISR_NOERRCODE 128" in interrupt.s, and an extra idt_set_gate in descriptor_tables.c (and of course an extra function prototype in descriptor_tables.h).
+</p>
+<p></p><h4>10.2.2.1. syscall.h</h4>
+<p>Initially, we just need to give an interface for starting the syscall interface...
+</p>
+<p><div class='code'>
+<span class='code_comment'>// syscall.h -- Defines the interface for and structures relating to the syscall dispatch system.</span><br/>
+<span class='code_comment'>//              Written for JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>ifndef</span>&nbsp;SYSCALL_H<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;SYSCALL_H<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>initialise_syscalls</span>();<br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>endif</span>
+</div>
+</p>
+<p></p><h4>10.2.2.2. syscall.c</h4>
+<p>... and then implement it. As mentioned previously, the normal way to dispatch syscalls is to have one register contain a number which indexes a table of functions. the given function is then executed.
+</p>
+<p>For the moment, we just have three functions which can be called via syscall - the three monitor output functions. This will enable us to check whether our code works easier, by allowing text output in user mode.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// syscall.c -- Defines the implementation of a system call system.</span><br/>
+<span class='code_comment'>//              Written for JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"syscall.h"<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"isr.h"<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"monitor.h"<br/>
+</span><br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>syscall_handler</span>(<span class='code_typedef'>registers_t</span>&nbsp;<span class='code_operator'>*</span>regs);<br/>
+<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span>syscalls[<span class='code_integer'>3</span>]&nbsp;<span class='code_operator'>=</span><br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>&</span>monitor_write,<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>&</span>monitor_write_hex,<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>&</span>monitor_write_dec,<br/>
+};<br/>
+<span class='code_primitive'>u32int</span>&nbsp;num_syscalls&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>3</span>;<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>initialise_syscalls</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Register our syscall handler.</span><br/>
+&nbsp;&nbsp;&nbsp;register_interrupt_handler&nbsp;(<span class='code_integer'>0</span>x80,&nbsp;<span class='code_operator'>&</span>syscall_handler);<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>syscall_handler</span>(<span class='code_typedef'>registers_t</span>&nbsp;<span class='code_operator'>*</span>regs)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Firstly, check if the requested syscall number is valid.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The syscall number is found in EAX.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(regs<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>eax&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>=</span>&nbsp;num_syscalls)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Get the required syscall location.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span>location&nbsp;<span class='code_operator'>=</span>&nbsp;syscalls[regs<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>eax];<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We don't know how many parameters the function wants, so we just</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// push them all onto the stack in the correct order. The function will</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// use all the parameters it wants, and we can pop them all back off afterwards.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;ret;<br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;volatile&nbsp;(<span class='code_string'>"&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;push&nbsp;%1;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;push&nbsp;%2;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;push&nbsp;%3;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;push&nbsp;%4;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;push&nbsp;%5;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;call&nbsp;*%6;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pop&nbsp;%%ebx;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pop&nbsp;%%ebx;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pop&nbsp;%%ebx;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pop&nbsp;%%ebx;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pop&nbsp;%%ebx;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;"</span>&nbsp;:&nbsp;<span class='code_string'>"=a"</span>&nbsp;(ret)&nbsp;:&nbsp;<span class='code_string'>"r"</span>&nbsp;(regs<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>edi),&nbsp;<span class='code_string'>"r"</span>&nbsp;(regs<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>esi),&nbsp;<span class='code_string'>"r"</span>&nbsp;(regs<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>edx),&nbsp;<span class='code_string'>"r"</span>&nbsp;(regs<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>ecx),&nbsp;<span class='code_string'>"r"</span>&nbsp;(regs<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>ebx),&nbsp;<span class='code_string'>"r"</span>&nbsp;(location));<br/>
+&nbsp;&nbsp;&nbsp;regs<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>eax&nbsp;<span class='code_operator'>=</span>&nbsp;ret;<br/>
+}
+</div>
+</p>
+<p>So here we have a table of the addresses of our syscall functions. The initialise_syscalls function merely adds the syscall_handler function as an interrupt handler for interrupt 0x80.
+</p>
+<p>The syscall_handler function checks that the given function index is valid, then gets the address of the function to call, and then pushes all the parameters we were given onto the stack, call the function, and pop all the parameters back off the stack.
+</p>
+<p>As is customary it also puts the return value of the function call in EAX, when the interrupt returns.
+</p>
+<p></p><h3>10.2.3. Helper macros</h3>
+<p>So a syscall from user mode would look something like this:
+</p>
+<p><div class='code'>
+<span class='code_operator'>mov</span>&nbsp;eax,&nbsp;<function&nbsp;to&nbsp;<span class='code_operator'>call</span>><br/>
+<span class='code_operator'>mov</span>&nbsp;ebx,&nbsp;<first&nbsp;parameter><br/>
+<span class='code_operator'>mov</span>&nbsp;ecx,&nbsp;<second&nbsp;parameter><br/>
+<span class='code_operator'>mov</span>&nbsp;edx,&nbsp;<third&nbsp;parameter><br/>
+<span class='code_operator'>mov</span>&nbsp;esi,&nbsp;<fourth&nbsp;parameter><br/>
+<span class='code_operator'>mov</span>&nbsp;edi,&nbsp;<fifth&nbsp;parameter><br/>
+int&nbsp;0x80&nbsp;<span class='code_comment'>; execute syscall</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; return value of syscall is in EAX.</span>
+</div>
+</p>
+<p>This is, however, a little unwieldy. We can simplify this by creating some helper macros to define stub functions that contain inline assembler that actually does the syscall;
+</p>
+<p><i>In syscall.h</i>
+<div class='code'>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;DECL_SYSCALL0(fn)&nbsp;int&nbsp;syscall_##fn();<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;DECL_SYSCALL1(fn,p1)&nbsp;int&nbsp;syscall_##fn(p1);<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;DECL_SYSCALL2(fn,p1,p2)&nbsp;int&nbsp;syscall_##fn(p1,p2);<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;DECL_SYSCALL3(fn,p1,p2,p3)&nbsp;int&nbsp;syscall_##fn(p1,p2,p3);<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;DECL_SYSCALL4(fn,p1,p2,p3,p4)&nbsp;int&nbsp;syscall_##fn(p1,p2,p3,p4);<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;DECL_SYSCALL5(fn,p1,p2,p3,p4,p5)&nbsp;int&nbsp;syscall_##fn(p1,p2,p3,p4,p5);<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;DEFN_SYSCALL0(fn,&nbsp;num)&nbsp;\
+<br />int&nbsp;syscall_##fn()&nbsp;\
+<br />{&nbsp;\
+<br />&nbsp;int&nbsp;a;&nbsp;\
+<br />&nbsp;asm&nbsp;volatile("int&nbsp;$0x80"&nbsp;:&nbsp;"=a"&nbsp;(a)&nbsp;:&nbsp;"0"&nbsp;(num));&nbsp;\
+<br />&nbsp;return&nbsp;a;&nbsp;\
+<br />}<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;DEFN_SYSCALL1(fn,&nbsp;num,&nbsp;P1)&nbsp;\
+<br />int&nbsp;syscall_##fn(P1&nbsp;p1)&nbsp;\
+<br />{&nbsp;\
+<br />&nbsp;int&nbsp;a;&nbsp;\
+<br />&nbsp;asm&nbsp;volatile("int&nbsp;$0x80"&nbsp;:&nbsp;"=a"&nbsp;(a)&nbsp;:&nbsp;"0"&nbsp;(num),&nbsp;"b"&nbsp;((int)p1));&nbsp;\
+<br />&nbsp;return&nbsp;a;&nbsp;\
+<br />}<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;DEFN_SYSCALL2(fn,&nbsp;num,&nbsp;P1,&nbsp;P2)&nbsp;\
+<br />int&nbsp;syscall_##fn(P1&nbsp;p1,&nbsp;P2&nbsp;p2)&nbsp;\
+<br />{&nbsp;\
+<br />&nbsp;int&nbsp;a;&nbsp;\
+<br />&nbsp;asm&nbsp;volatile("int&nbsp;$0x80"&nbsp;:&nbsp;"=a"&nbsp;(a)&nbsp;:&nbsp;"0"&nbsp;(num),&nbsp;"b"&nbsp;((int)p1),&nbsp;"c"&nbsp;((int)p2));&nbsp;\
+<br />&nbsp;return&nbsp;a;&nbsp;\
+<br />}<br/>
+</span><br/>
+...
+</div>
+</p>
+<p>So we have a macro "DECL_SYSCALLX", which declares a stub function for a function <i>fn</i>, with <i>X</i> parameters, they being of type <i>p1</i>..<i>pn</i>.
+</p>
+<p>The macro "DEFN_SYSCALLX" actually defines the stub function, which is just a piece of inline assembly. The <i>num</i> parameter is the index in the syscall function table to call.
+</p>
+<p>So to define our monitor_* functions, we should declare them in syscall.h:
+</p>
+<p><div class='code'>
+<span class='code_function'>DECL_SYSCALL1</span>(monitor_write,&nbsp;const&nbsp;<span class='code_primitive'>char</span><span class='code_operator'>*</span>)<br/>
+<span class='code_function'>DECL_SYSCALL1</span>(monitor_write_hex,&nbsp;const&nbsp;<span class='code_primitive'>char</span><span class='code_operator'>*</span>)<br/>
+<span class='code_function'>DECL_SYSCALL1</span>(monitor_write_dec,&nbsp;const&nbsp;<span class='code_primitive'>char</span><span class='code_operator'>*</span>)
+</div>
+</p>
+<p>and define them in syscall.c:
+</p>
+<p><div class='code'>
+<span class='code_function'>DEFN_SYSCALL1</span>(monitor_write,&nbsp;<span class='code_integer'>0</span>,&nbsp;const&nbsp;<span class='code_primitive'>char</span><span class='code_operator'>*</span>);<br/>
+<span class='code_function'>DEFN_SYSCALL1</span>(monitor_write_hex,&nbsp;<span class='code_integer'>1</span>,&nbsp;const&nbsp;<span class='code_primitive'>char</span><span class='code_operator'>*</span>);<br/>
+<span class='code_function'>DEFN_SYSCALL1</span>(monitor_write_dec,&nbsp;<span class='code_integer'>2</span>,&nbsp;const&nbsp;<span class='code_primitive'>char</span><span class='code_operator'>*</span>);
+</div>
+</p>
+<p></p><h2>10.3. Testing</h2>
+<p><div class='image_frame'><img src='images/user_mode_bochs.png' /><br/><span class='image_caption'>Hello, user world!</span></div>
+<i>In main.c</i>
+<div class='code'>
+<span class='code_comment'>// Start paging.</span><br/>
+<span class='code_function'>initialise_paging</span>();<br/>
+<br/>
+<span class='code_comment'>// Start multitasking.</span><br/>
+<span class='code_function'>initialise_tasking</span>();<br/>
+<br/>
+<span class='code_comment'>// Initialise the initial ramdisk, and set it as the filesystem root.</span><br/>
+fs_root&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>initialise_initrd</span>(initrd_location);<br/>
+<br/>
+<span class='code_function'>initialise_syscalls</span>();<br/>
+<br/>
+<span class='code_function'>switch_to_user_mode</span>();<br/>
+<br/>
+<span class='code_function'>syscall_monitor_write</span>(<span class='code_string'>"Hello,&nbsp;user&nbsp;world!<span class='code_character'>\n</span>"</span>);<br/>
+<br/>
+<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>;
+</div>
+</p>
+<p>With this test code in main.c, you should have a functional user mode and syscall interface, suitable for running untrusted user programs.
+</p>
+<p>Full source code and image file is available <a href='http://www.jamesmolloy.co.uk/downloads/user_mode.tar.gz'>here</a>.
+</p>
+<p></p><h3>10.3.1. Possible problems</h3>
+<p>If you keep getting page faults when jumping to user mode, make sure that your kernel code/data is set to be user-accessible. When you actually load user programs you won't want this to be the case, however at the moment we merely jump back to the kernel and execute code in main(), so it needs to be accessible in user mode!
+</p></div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+</body></html>

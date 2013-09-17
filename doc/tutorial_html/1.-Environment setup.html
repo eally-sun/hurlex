@@ -1,0 +1,212 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><title>1.-Environment setup</title><link rel='stylesheet' type='text/css' href='css/highlight.css'><link rel='stylesheet' type='text/css' href='css/layout.css'></head><body><div class="header">
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="index.html">Home</a> &raquo;
+	 	JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+
+<div class='index'>
+<a href='1.-Environment setup.html' class='selected' >1. Environment setup</a><br/><a href='2.-Genesis.html'>2. Genesis</a><br/><a href='3.-The Screen.html'>3. The Screen</a><br/><a href='4.-The GDT and IDT.html'>4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html'>5. IRQs and the PIT</a><br/><a href='6.-Paging.html'>6. Paging</a><br/><a href='7.-The Heap.html'>7. The Heap</a><br/><a href='8.-The VFS and the initrd.html'>8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html'>9. Multitasking</a><br/><a href='10.-User Mode.html'>10. User Mode</a><br/></div>
+<h1>1. Environment setup</h1>
+<p>We need a base from which to design and make our kernel. Here I will
+be assuming that you are using a *nix system, with the GNU
+toolchain. If you want to use a windows system, you must either use
+cygwin (which is a *nix emulation environment) or DJGPP. Either way,
+the makefiles and commands in this tutorial may not work.
+</p>
+<p></p><h2>1.1. Directory structure</h2>
+<p>My directory is laid out as follows:
+</p>
+<p><div class='code'>
+tutorial<br/>
+&nbsp;|<br/>
+&nbsp;+--&nbsp;src<br/>
+&nbsp;|<br/>
+&nbsp;+--&nbsp;docs
+</div>
+</p>
+<p>All your source files will go in src, and all your documentation (you
+do write documentation? ;) ) should go in docs.
+</p>
+<p></p><h2>1.2. Compiling</h2>
+<p>The examples in this tutorial should compile successfully with the GNU
+toolchain (gcc, ld, gas, etc). The assembly examples are written in
+intel syntax, which is (my personal opinion) a much more
+human-readable syntax than the AT&T syntax that GNU AS uses. To
+assemble these, you will need the <a href='http://nasm.sourceforge.net'>Netwide Assembler</a>.
+</p>
+<p>This tutorial is <i>not</i> a bootloader tutorial. We will be using
+<a href='http://www.gnu.org/software/grub'>GRUB</a> to load our kernel. To do this, we
+need a floppy disk image with GRUB preloaded onto it. There are
+<a href='tutorials'>tutorials</a> to do this, but, happily, I have made a standard image,
+which can be found <a href='/downloads/floppy.img'>here</a>. This goes in your 'tutorial' (or whatever
+you named it) directory.
+</p>
+<p></p><h2>1.3. Running</h2>
+<p>There is no alternative for bare hardware as a testbed
+system. Unfortunately, bare hardware is pretty pants at telling you
+where things went wrong (but of course, you're going to write
+completely bug-free code first time, aren't you?). Enter
+<a href='http://www.bochs.sourceforge.net'>Bochs</a>. Bochs is an open-source x86-64
+emulator. When things go completely awry, bochs will tell you, and
+store the processor state in a logfile, which is extremely
+useful. Also it can be run and rebooted much faster than a real
+machine. My examples will be made to run well on bochs.
+</p>
+<p></p><h2>1.4. Bochs</h2>
+<p>In order to run bochs, you are going to need a bochs configuration
+file (bochsrc.txt). Coincidentally, a sample one is included below!
+</p>
+<p>Take care with the locations of the bios files. These seem to change
+between installations, and if you made bochs from source it is very
+likely you don't even have them. Google their filenames, you can get
+them from the official bochs site among others.
+</p>
+<p><div class='code'>
+megs:&nbsp;32<br/>
+romimage:&nbsp;file=/usr/share/bochs/BIOS-bochs-latest,&nbsp;address=0xf0000<br/>
+vgaromimage:&nbsp;/usr/share/bochs/VGABIOS-elpin-2.40<br/>
+floppya:&nbsp;1_44=/dev/loop0,&nbsp;status=inserted<br/>
+boot:&nbsp;a<br/>
+log:&nbsp;bochsout.txt<br/>
+mouse:&nbsp;enabled=0<br/>
+clock:&nbsp;sync=realtime<br/>
+cpu:&nbsp;ips=500000
+</div>
+</p>
+<p>This will make bochs emulate a 32MB machine with a clock speed similar
+to a 350MHz PentiumII. The instructions per second can be cranked up -
+I prefer a slower emulation speed, simply so I can see what is going
+on if lots of text is being scrolled.
+</p>
+<p></p><h2>1.5. Useful scripts</h2>
+<p>We are going to be doing several things very often - making (compiling
+and linking) our project, and transferring the resulting kernel binary
+to our floppy disk image.
+</p>
+<p></p><h3>1.5.1. Makefile</h3>
+<p><div class='code'>
+<span class='code_comment'># Makefile for JamesM's kernel tutorials.</span><br/>
+<span class='code_comment'># The C and C++ rules are already setup by default.</span><br/>
+<span class='code_comment'># The only one that needs changing is the assembler </span><br/>
+<span class='code_comment'># rule, as we use nasm instead of GNU as.</span><br/>
+<br/>
+<span class='code_variable'>SOURCES</span>=boot.o<br/>
+<br/>
+<span class='code_variable'>CFLAGS</span>=<br/>
+<span class='code_variable'>LDFLAGS</span>=-Tlink.ld<br/>
+<span class='code_variable'>ASFLAGS</span>=-felf<br/>
+<br/>
+<span class='code_label'>all:</span>&nbsp;$(<span class='code_variable'>SOURCES</span>)&nbsp;link&nbsp;<br/>
+<br/>
+<span class='code_label'>clean:</span><br/>
+&nbsp;&raquo;&nbsp;	-<span class='code_primitive'>rm</span>&nbsp;*.o&nbsp;kernel<br/>
+<br/>
+<span class='code_label'>link:</span><br/>
+&nbsp;&raquo;&nbsp;	ld&nbsp;$(<span class='code_variable'>LDFLAGS</span>)&nbsp;-o&nbsp;kernel&nbsp;$(<span class='code_variable'>SOURCES</span>)<br/>
+<br/>
+.s<span class='code_label'>.o:</span><br/>
+&nbsp;&raquo;&nbsp;	nasm&nbsp;$(<span class='code_variable'>ASFLAGS</span>)&nbsp;$<span class='code_operator'>&lt;</span>
+</div>
+</p>
+<p>This Makefile will compile every file in SOURCES, then link them
+together into one ELF binary, 'kernel'. It uses a linker script,
+'link.ld' to do this:
+</p>
+<p></p><h3>1.5.2. Link.ld</h3>
+<p><div class='code'>
+/*&nbsp;Link.ld&nbsp;--&nbsp;Linker&nbsp;script&nbsp;for&nbsp;the&nbsp;kernel&nbsp;-&nbsp;ensure&nbsp;everything&nbsp;goes&nbsp;in&nbsp;the&nbsp;*/<br/>
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Correct&nbsp;place.&nbsp;&nbsp;*/<br/>
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Original&nbsp;file&nbsp;taken&nbsp;from&nbsp;Bran's&nbsp;Kernel&nbsp;Development&nbsp;*/<br/>
+/*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tutorials:&nbsp;http://www.osdever.net/bkerndev/index.php.&nbsp;*/<br/>
+<br/>
+ENTRY(start)<br/>
+SECTIONS<br/>
+{<br/>
+&nbsp;&nbsp;.text&nbsp;0x100000&nbsp;:<br/>
+&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;code&nbsp;=&nbsp;.;&nbsp;_code&nbsp;=&nbsp;.;&nbsp;__code&nbsp;=&nbsp;.;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;*(.text)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;.&nbsp;=&nbsp;ALIGN(4096);<br/>
+&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;.data&nbsp;:<br/>
+&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;data&nbsp;=&nbsp;.;&nbsp;_data&nbsp;=&nbsp;.;&nbsp;__data&nbsp;=&nbsp;.;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*(.data)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*(.rodata)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.&nbsp;=&nbsp;ALIGN(4096);<br/>
+&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;.bss&nbsp;:<br/>
+&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;bss&nbsp;=&nbsp;.;&nbsp;_bss&nbsp;=&nbsp;.;&nbsp;__bss&nbsp;=&nbsp;.;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;*(.bss)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;.&nbsp;=&nbsp;ALIGN(4096);<br/>
+&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;end&nbsp;=&nbsp;.;&nbsp;_end&nbsp;=&nbsp;.;&nbsp;__end&nbsp;=&nbsp;.;<br/>
+}
+</div>
+</p>
+<p>This script tells LD how to set up our kernel image. Firstly it tells
+LD that the start location of our binary should be the symbol 'start'.
+It then tells LD that the .text section (that's where all your code
+goes) should be first, and should start at 0x100000 (1MB). The .data
+(initialised static data) and the .bss (uninitialised static data)
+should be next, and each should be page-aligned (ALIGN(4096)).
+Linux GCC also adds in an extra data section: .rodata. This is for
+read-only initialised data, such as constants. For simplicity we
+simply bundle this in with the .data section.
+</p>
+<p></p><h3>1.5.3. update_image.sh</h3>
+<p>A nice little script that will poke your new kernel binary into the
+floppy image file (This assumes you have made a directory /mnt). Note:
+you will need /sbin in your $PATH to use losetup.
+</p>
+<p><div class='code'>
+<span class='code_comment'>#!/bin/bash</span><br/>
+<br/>
+<span 
+class='code_primitive'>sudo</span>&nbsp;<span 
+class='code_primitive'>losetup</span>&nbsp;/dev/loop0&nbsp;floppy.img<br/>
+<span 
+class='code_primitive'>sudo</span>&nbsp;<span 
+class='code_primitive'>mount</span>&nbsp;/dev/loop0&nbsp;/mnt<br/>
+<span 
+class='code_primitive'>sudo</span>&nbsp;<span 
+class='code_primitive'>cp</span>&nbsp;src/kernel&nbsp;/mnt/kernel<br/>
+<span 
+class='code_primitive'>sudo</span>&nbsp;<span 
+class='code_primitive'>umount</span>&nbsp;/dev/loop0<br/>
+<span 
+class='code_primitive'>sudo</span>&nbsp;<span 
+class='code_primitive'>losetup</span>&nbsp;-d&nbsp;/dev/loop0
+</div>
+</p>
+<p></p><h3>1.5.4. run_bochs.sh</h3>
+<p>This script will setup a loopback device, run bochs on it, then
+disconnect it.
+</p>
+<p><div class='code'>
+<span class='code_comment'>#!/bin/bash</span><br/>
+<br/>
+<span class='code_comment'># run_bochs.sh</span><br/>
+<span class='code_comment'># mounts the correct loopback device, runs bochs, then unmounts.</span><br/>
+<br/>
+<span 
+class='code_primitive'>sudo</span>&nbsp;/sbin/<span 
+class='code_primitive'>losetup</span>&nbsp;/dev/loop0&nbsp;floppy.img<br/>
+<span 
+class='code_primitive'>sudo</span>&nbsp;bochs&nbsp;-f&nbsp;bochsrc.txt<br/>
+<span 
+class='code_primitive'>sudo</span>&nbsp;/sbin/<span 
+class='code_primitive'>losetup</span>&nbsp;-d&nbsp;/dev/loop0
+</div>
+</p>
+<p></p></div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+</body></html>

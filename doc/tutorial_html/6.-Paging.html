@@ -1,0 +1,515 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><title>6.-Paging</title><link rel='stylesheet' type='text/css' href='css/highlight.css'><link rel='stylesheet' type='text/css' href='css/layout.css'></head><body><div class="header">
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="index.html">Home</a> &raquo;
+	 	JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+
+<div class='index'>
+<a href='1.-Environment setup.html'>1. Environment setup</a><br/><a href='2.-Genesis.html'>2. Genesis</a><br/><a href='3.-The Screen.html'>3. The Screen</a><br/><a href='4.-The GDT and IDT.html'>4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html'>5. IRQs and the PIT</a><br/><a href='6.-Paging.html' class='selected' >6. Paging</a><br/><a href='7.-The Heap.html'>7. The Heap</a><br/><a href='8.-The VFS and the initrd.html'>8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html'>9. Multitasking</a><br/><a href='10.-User Mode.html'>10. User Mode</a><br/></div>
+<h1>6. Paging</h1>
+<p>In this chapter we're going to enable paging. Paging serves a twofold purpose - memory protection, and virtual memory (the two being almost inextricably interlinked).
+</p>
+<p></p><h2>6.1. Virtual memory (theory)</h2>
+<p><i>If you already know what virtual memory is, you can skip this section.</i>
+</p>
+<p>In linux, if you create a tiny test program such as
+</p>
+<p><div class='code'>
+<span class='code_primitive'>int</span>&nbsp;<span class='code_function'>main</span>(<span class='code_primitive'>char</span>&nbsp;argc,&nbsp;<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span><span class='code_operator'>*</span>argv)<br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+}
+</div>
+</p>
+<p>, compile it, then run 'objdump -f', you might find something similar to this.
+</p>
+<p><div class='code'>
+jamesmol@aubergine:~/test&gt;&nbsp;objdump&nbsp;-f&nbsp;a.out<br/>
+<br/>
+a.out:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;file&nbsp;format&nbsp;elf32-i386<br/>
+architecture:&nbsp;i386,&nbsp;flags&nbsp;0x00000112:<br/>
+EXEC_P,&nbsp;HAS_SYMS,&nbsp;D_PAGED<br/>
+start&nbsp;address&nbsp;0x080482a0
+</div>
+</p>
+<p>Notice the start address of the program is at 0x80482a0, which is about 128MB into the address space. It may seem strange, then, that this program will run perfectly on machines with < 128MB of RAM.
+</p>
+<p>What the program is actually 'seeing', when it reads and writes memory, is a virtual address space. Parts of the virtual address space are mapped to physical memory, and parts are unmapped. If you try to access an unmapped part, the processor raises a <i>page fault</i>, the operating system catches it, and in POSIX systems delivers a SIGSEGV signal closely followed by SIGKILL.
+</p>
+<p>This abstraction is extremely useful. It means that compilers can produce a program that relies on the code being at an <i>exact</i> location in memory, every time it is run. With virtual memory, the process <i>thinks</i> it is at, for example, 0x080482a0, but actually it could be at physical memory location 0x1000000. Not only that, but processes cannot accidentally (or deliberately) trample other processes' data or code.
+</p>
+<p>Virtual memory of this type is wholly dependent on hardware support. It cannot be emulated by software. Luckily, the x86 has just such a thing. It's called the MMU (memory management unit), and it handles all memory mappings due to segmentation and paging, forming a layer between the CPU and memory (actually, it's part of the CPU, but that's just an implementation detail).
+</p>
+<p></p><h2>6.2. Paging as a concretion of virtual memory</h2>
+<p>Virtual memory is an abstract principle. As such it requires <i>concretion</i> through some system/algorithm. Both segmentation (see <a href='3.'>chapter 3</a>) and paging are valid methods for implementing virtual memory. As mentioned in <a href='3.'>chapter 3</a> however, segmentation is becoming obsolete. Paging is the newer, better alternative for the x86 architecture.
+</p>
+<p>Paging works by splitting the virtual address space into blocks called <i>pages</i>, which are usually 4KB in size. Pages can then be mapped on to <i>frames</i> - equally sized blocks of physical memory.
+</p>
+<p></p><h3>6.2.1. Page entries</h3>
+<p><div class='image_frame'><img src='images/paging_pte.png' /><br/><span class='image_caption'>Page table entry format</span></div>Each process normally has a different set of page mappings, so that virtual memory spaces are independent of each other. In the x86 architecture (32-bit) pages are fixed at 4KB in size. Each page has a corresponding descriptor word, which tells the processor which frame it is mapped to. Note that because pages and frames must be aligned on 4KB boundaries (4KB being 0x1000 bytes), the least significant 12 bits of the 32-bit word are always zero. The architecture takes advantage of this by using them to store information about the page, such as whether it is present, whether it is kernel-mode or user-mode etc. The layout of this word is in the picture on the right.
+</p>
+<p>The fields in that picture are pretty simple, so let's quickly go through them.
+</p>
+<p><b>P</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Set if the page is present in memory.<br/>
+<b>R/W</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;If set, that page is writeable. If unset, the page is read-only. This does not apply when code is running in kernel-mode (unless a flag in CR0 is set).<br/>
+<b>U/S</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;If set, this is a user-mode page. Else it is a supervisor (kernel)-mode page. User-mode code cannot write to or read from kernel-mode pages.<br/>
+<b>Reserved</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;These are used by the CPU internally and cannot be trampled.<br/>
+<b>A</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Set if the page has been accessed (Gets set by the CPU).<br/>
+<b>D</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Set if the page has been written to (dirty).<br/>
+<b>AVAIL</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;These 3 bits are unused and available for kernel-use.<br/>
+<b>Page frame address</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;The high 20 bits of the frame address in physical memory.<br/>
+</p>
+<p></p><h3>6.2.2. Page directories/tables</h3>
+<p><div class='image_frame'><img src='images/page_directory.png' /><br/><span class='image_caption'>2-tier layout</span></div>Possibly you've been tapping on your calculator and have worked out that to generate a table mapping each 4KB page to one 32-bit descriptor over a 4GB address space requires 4MB of memory. Perhaps, perhaps not - but it's true.
+</p>
+<p>4MB may seem like a large overhead, and to be fair, it is. If you have 4GB of physical RAM, it's not much. However, if you are working on a machine that has 16MB of RAM, you've just lost a quarter of your available memory! What we want is something progressive, that will take up an amount of space proportionate to the amount of RAM you have.
+</p>
+<p>Well, we don't have that. But intel did come up with something similar - they use a 2-tier system. The CPU gets told about a <i>page directory</i>, which is a 4KB large table, each entry of which points to a <i>page table</i>. The page table is, again, 4KB large and each entry is a <i>page table entry</i>, described above.
+</p>
+<p>This way, The entire 4GB address space can be covered with the advantage that if a page table has no entries, it can be freed and it's <i>present</i> flag unset in the page directory.
+</p>
+<p></p><h3>6.2.3. Enabling paging</h3>
+<p>Enabling paging is extremely easy.
+</p>
+<p><ol>
+<li>Copy the location of your page directory into the CR3 register. This must, of course, be the <b>physical</b> address.</li>
+<li>Set the <i>PG</i> bit in the CR0 register. You can do this by OR-ing with 0x80000000.</li>
+</ol>
+</p>
+<p></p><h2>6.3. Page faults</h2>
+<p>When a process does something the memory-management unit doesn't like, a page fault interrupt is thrown. Situations that can cause this are (not complete):
+</p>
+<p><ul>
+<li>Reading from or writing to an area of memory that is not mapped (page entry/table's 'present' flag is not set)</li>
+<li>The process is in user-mode and tries to write to a read-only page.</li>
+<li>The process is in user-mode and tries to access a kernel-only page.</li>
+<li>The page table entry is corrupted - the reserved bits have been overwritten.</li>
+</ul>
+</p>
+<p>The page fault interrupt is number 14, and looking at <a href='3.'>chapter 3</a> we can see that this throws an error code. This error code gives us quite a bit of information about what happened.
+</p>
+<p><b>Bit 0</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;If set, the fault was <b>not</b> because the page wasn't present. If unset, the page wasn't present.<br/>
+<b>Bit 1</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;If set, the operation that caused the fault was a write, else it was a read.<br/>
+<b>Bit 2</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;If set, the processor was running in user-mode when it was interrupted. Else, it was running in kernel-mode.<br/>
+<b>Bit 3</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;If set, the fault was caused by reserved bits being overwritten.<br/>
+<b>Bit 4</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;If set, the fault occurred during an instruction fetch.<br/>
+</p>
+<p>The processor also gives us another piece of information - the address that caused the fault. This is located in the CR2 register. Beware that if your page fault hander itself causes another page fault exception this register will be overwritten - so save it early!
+</p>
+<p></p><h2>6.4. Putting it into practice</h2>
+<p>We're almost ready to start implementing. We will, however, need a few assistant functions first, the most important of which are memory management functions.
+</p>
+<p></p><h3>6.4.1. Simple memory management with placement malloc</h3>
+<p>If you come from a C++ background, you may have heard of 'placement new'. This is a version of new that takes a parameter. Instead of calling malloc, as it normally would, it creates the object at the address specified. We are going to use a very similar concept.
+</p>
+<p>When the kernel is sufficiently booted, we will have a kernel heap active and operational. The way we code heaps, though, usually requires that virtual memory is enabled. So we need a simple alternative to allocate memory before the heap is active.
+</p>
+<p>As we're allocating quite early on in the kernel bootup, we can make the assumption that nothing that is kmalloc()'d will ever need to be kfree()'d. This simplifies things greatly. We can just have a pointer (<i>placement address</i>) to some free memory that we pass back to the requestee then increment. Thus:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_primitive'>u32int</span>&nbsp;sz)<br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;tmp&nbsp;<span class='code_operator'>=</span>&nbsp;placement_address;<br/>
+&nbsp;&nbsp;placement_address&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;sz;<br/>
+&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;tmp;<br/>
+}
+</div>
+</p>
+<p>That will actually suffice. However, we have another requirement. When we allocate page tables and directories, they <i>must be page-aligned</i>. So we can build that in:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_primitive'>u32int</span>&nbsp;sz,&nbsp;<span class='code_primitive'>int</span>&nbsp;align)<br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(align&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span>&nbsp;(placement_address&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFFFFF000))&nbsp;<span class='code_comment'>// If the address is not already page-aligned</span><br/>
+&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Align it.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;placement_address&nbsp;<span class='code_operator'>&=</span>&nbsp;<span class='code_integer'>0</span>xFFFFF000;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;placement_address&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;tmp&nbsp;<span class='code_operator'>=</span>&nbsp;placement_address;<br/>
+&nbsp;&nbsp;placement_address&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;sz;<br/>
+&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;tmp;<br/>
+}
+</div>
+</p>
+<p>Now, unfortunately, we have one more requirement, and I can't really explain to you why it is required until later in the tutorials. It has to do with when we clone a page directory (when fork()ing processes). At this point, paging will be fully enabled, and kmalloc will return a virtual address. But, we also (bear with me, you'll be glad we did later) need to get the <i>physical</i> address of the memory allocated. Take it on faith for now - it's not much code anyway.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_primitive'>u32int</span>&nbsp;sz,&nbsp;<span class='code_primitive'>int</span>&nbsp;align,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_operator'>*</span>phys)<br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(align&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span>&nbsp;(placement_address&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFFFFF000))&nbsp;<span class='code_comment'>// If the address is not already page-aligned</span><br/>
+&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Align it.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;placement_address&nbsp;<span class='code_operator'>&=</span>&nbsp;<span class='code_integer'>0</span>xFFFFF000;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;placement_address&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(phys)<br/>
+&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>*</span>phys&nbsp;<span class='code_operator'>=</span>&nbsp;placement_address;<br/>
+&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;tmp&nbsp;<span class='code_operator'>=</span>&nbsp;placement_address;<br/>
+&nbsp;&nbsp;placement_address&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;sz;<br/>
+&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;tmp;<br/>
+}
+</div>
+</p>
+<p>Great. This is all we need for simple memory management. In my code I have actually (for aesthetic purposes) renamed <i>kmalloc</i> to <i>kmalloc_int</i> (for kmalloc_internal). I then have several wrapper functions:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>kmalloc_a</span>(<span class='code_primitive'>u32int</span>&nbsp;sz);&nbsp;&nbsp;<span class='code_comment'>// page aligned.</span><br/>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>kmalloc_p</span>(<span class='code_primitive'>u32int</span>&nbsp;sz,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_operator'>*</span>phys);&nbsp;<span class='code_comment'>// returns a physical address.</span><br/>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>kmalloc_ap</span>(<span class='code_primitive'>u32int</span>&nbsp;sz,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_operator'>*</span>phys);&nbsp;<span class='code_comment'>// page aligned and returns a physical address.</span><br/>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_primitive'>u32int</span>&nbsp;sz);&nbsp;<span class='code_comment'>// vanilla (normal).</span>
+</div>
+</p>
+<p>I just feel this interface is nicer than specifying 3 parameters for every kernel heap allocation! These definitions should go in kheap.h/kheap.c.
+</p>
+<p></p><h3>6.4.2. Required definitions</h3>
+<p><i>paging.h</i> should contain some structure definitions that will make our life easier.
+</p>
+<p><div class='code'>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>ifndef</span>&nbsp;PAGING_H<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;PAGING_H<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"isr.h"<br/>
+</span><br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;page<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;present&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;<span class='code_integer'>1</span>;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Page present in memory</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;rw&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;<span class='code_integer'>1</span>;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Read-only if clear, readwrite if set</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;user&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;<span class='code_integer'>1</span>;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Supervisor level only if clear</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;accessed&nbsp;&nbsp;&nbsp;:&nbsp;<span class='code_integer'>1</span>;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Has the page been accessed since last refresh?</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;dirty&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;<span class='code_integer'>1</span>;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Has the page been written to since last refresh?</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;unused&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;<span class='code_integer'>7</span>;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Amalgamation of unused and reserved bits</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;frame&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;<span class='code_integer'>20</span>;&nbsp;&nbsp;<span class='code_comment'>// Frame address (shifted right 12 bits)</span><br/>
+}&nbsp;<span class='code_typedef'>page_t</span>;<br/>
+<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;page_table<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>page_t</span>&nbsp;pages[<span class='code_integer'>1024</span>];<br/>
+}&nbsp;<span class='code_typedef'>page_table_t</span>;<br/>
+<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;page_directory<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>/**<br />
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Array&nbsp;of&nbsp;pointers&nbsp;to&nbsp;pagetables.<br />
+&nbsp;&nbsp;&nbsp;**/</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>page_table_t</span>&nbsp;<span class='code_operator'>*</span>tables[<span class='code_integer'>1024</span>];<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>/**<br />
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Array&nbsp;of&nbsp;pointers&nbsp;to&nbsp;the&nbsp;pagetables&nbsp;above,&nbsp;but&nbsp;gives&nbsp;their&nbsp;*physical*<br />
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;location,&nbsp;for&nbsp;loading&nbsp;into&nbsp;the&nbsp;CR3&nbsp;register.<br />
+&nbsp;&nbsp;&nbsp;**/</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;tablesPhysical[<span class='code_integer'>1024</span>];<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>/**<br />
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The&nbsp;physical&nbsp;address&nbsp;of&nbsp;tablesPhysical.&nbsp;This&nbsp;comes&nbsp;into&nbsp;play<br />
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;when&nbsp;we&nbsp;get&nbsp;our&nbsp;kernel&nbsp;heap&nbsp;allocated&nbsp;and&nbsp;the&nbsp;directory<br />
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;may&nbsp;be&nbsp;in&nbsp;a&nbsp;different&nbsp;location&nbsp;in&nbsp;virtual&nbsp;memory.<br />
+&nbsp;&nbsp;&nbsp;**/</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;physicalAddr;<br/>
+}&nbsp;<span class='code_typedef'>page_directory_t</span>;<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Sets&nbsp;up&nbsp;the&nbsp;environment,&nbsp;page&nbsp;directories&nbsp;etc&nbsp;and<br />
+&nbsp;&nbsp;enables&nbsp;paging.<br />
+**/</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>initialise_paging</span>();<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Causes&nbsp;the&nbsp;specified&nbsp;page&nbsp;directory&nbsp;to&nbsp;be&nbsp;loaded&nbsp;into&nbsp;the<br />
+&nbsp;&nbsp;CR3&nbsp;register.<br />
+**/</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>switch_page_directory</span>(<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>new);<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Retrieves&nbsp;a&nbsp;pointer&nbsp;to&nbsp;the&nbsp;page&nbsp;required.<br />
+&nbsp;&nbsp;If&nbsp;make&nbsp;==&nbsp;1,&nbsp;if&nbsp;the&nbsp;page-table&nbsp;in&nbsp;which&nbsp;this&nbsp;page&nbsp;should<br />
+&nbsp;&nbsp;reside&nbsp;isn't&nbsp;created,&nbsp;create&nbsp;it!<br />
+**/</span><br/>
+<span class='code_typedef'>page_t</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>get_page</span>(<span class='code_primitive'>u32int</span>&nbsp;address,&nbsp;<span class='code_primitive'>int</span>&nbsp;make,&nbsp;<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>dir);<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Handler&nbsp;for&nbsp;page&nbsp;faults.<br />
+**/</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>page_fault</span>(<span class='code_typedef'>registers_t</span>&nbsp;regs);
+</div>
+</p>
+<p>Note the <i>tablesPhysical</i> and <i>physicalAddr</i> members of page_table_t. What are they doing there?
+</p>
+<p>The physicalAddr member is actually only for when we clone page directories (not until later in the tutorials). Remember that at that point, the new directory will have an address in virtual memory that is not the same as physical memory. We will need the physical address to tell the CPU if we ever want to switch directories.
+</p>
+<p>The tablesPhysical member is similar. It is a solution to a problem: How do you access your page tables? It may seem simple, but remember that a page directory must hold <i>physical</i> addresses, not virtual ones. And the only way you can read/write to memory is using <i>virtual</i> addresses!
+</p>
+<p>One solution to this problem is to never access your page tables directly, but to map one page table to point back to the page directory, so that by accessing memory at a certain address you can see all your page tables as if they were pages, and all your page table entries as if they were normal integers. The diagram on the right should help to explain. This method is a little counter-intuitive in my opinion and it also wastes 256MB of addressable space, so I prefer another method.
+</p>
+<p>The second method is to, for every page directory, keep 2 arrays. One holding the physical addresses of it's page tables (for giving to the CPU), and the other holding the virtual ones (so we can read/write to them). This only gives us an extra overhead of 4KB per page directory, which is not much.
+</p>
+<p></p><h3>6.4.3. Frame allocation</h3>
+<p>If we want to map a page to a frame, we need some way of finding a free frame. Of course, we could just maintain a massive array of 1's and 0's, but that would be extremely wasteful - we don't need 32-bits just to hold 2 values, we can do that with 1 bit. So if we use a <a href='http://en.wikipedia.org/wiki/Bitset'>bitset</a>, we will be using 32 times less space!
+</p>
+<p>If you don't know what a bitset (also called a bitmap) is, you should read the link above. There are only 3 functions a bitset implements - set, test and clear. I have also implemented a function to efficiently find the first free frame from the bitmap. Have a look at it and work out why it is efficient. My implementation of these is below. I'm not going to go through explaining it - this is a general concept and is not kernel related. If you're confused, search google for bitset implementations, and if worst comes to the worst post on <a href='http://www.osdev.net/forum'>the osdev.net forums</a>.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// A bitset of frames - used or free.</span><br/>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_operator'>*</span>frames;<br/>
+<span class='code_primitive'>u32int</span>&nbsp;nframes;<br/>
+<br/>
+<span class='code_comment'>// Defined in kheap.c</span><br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_primitive'>u32int</span>&nbsp;placement_address;<br/>
+<br/>
+<span class='code_comment'>// Macros used in the bitset algorithms.</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;INDEX_FROM_BIT(a)&nbsp;(a/(8*4))<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;OFFSET_FROM_BIT(a)&nbsp;(a%(8*4))<br/>
+</span><br/>
+<span class='code_comment'>// Static function to set a bit in the frames bitset</span><br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>set_frame</span>(<span class='code_primitive'>u32int</span>&nbsp;frame_addr)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;frame&nbsp;<span class='code_operator'>=</span>&nbsp;frame_addr<span class='code_operator'>/</span><span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;idx&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>INDEX_FROM_BIT</span>(frame);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;off&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>OFFSET_FROM_BIT</span>(frame);<br/>
+&nbsp;&nbsp;&nbsp;frames[idx]&nbsp;<span class='code_operator'>|=</span>&nbsp;(<span class='code_integer'>0</span>x1&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>&lt;</span>&nbsp;off);<br/>
+}<br/>
+<br/>
+<span class='code_comment'>// Static function to clear a bit in the frames bitset</span><br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>clear_frame</span>(<span class='code_primitive'>u32int</span>&nbsp;frame_addr)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;frame&nbsp;<span class='code_operator'>=</span>&nbsp;frame_addr<span class='code_operator'>/</span><span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;idx&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>INDEX_FROM_BIT</span>(frame);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;off&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>OFFSET_FROM_BIT</span>(frame);<br/>
+&nbsp;&nbsp;&nbsp;frames[idx]&nbsp;<span class='code_operator'>&=</span>&nbsp;<span class='code_operator'>~</span>(<span class='code_integer'>0</span>x1&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>&lt;</span>&nbsp;off);<br/>
+}<br/>
+<br/>
+<span class='code_comment'>// Static function to test if a bit is set.</span><br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>test_frame</span>(<span class='code_primitive'>u32int</span>&nbsp;frame_addr)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;frame&nbsp;<span class='code_operator'>=</span>&nbsp;frame_addr<span class='code_operator'>/</span><span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;idx&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>INDEX_FROM_BIT</span>(frame);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;off&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>OFFSET_FROM_BIT</span>(frame);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;(frames[idx]&nbsp;<span class='code_operator'>&</span>&nbsp;(<span class='code_integer'>0</span>x1&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>&lt;</span>&nbsp;off));<br/>
+}<br/>
+<br/>
+<span class='code_comment'>// Static function to find the first free frame.</span><br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>first_frame</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;i,&nbsp;j;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;<span class='code_function'>INDEX_FROM_BIT</span>(nframes);&nbsp;i<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(frames[i]&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>xFFFFFFFF)&nbsp;<span class='code_comment'>// nothing free, exit early.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// at least one bit is free here.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(j&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;j&nbsp;<span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>32</span>;&nbsp;j<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;toTest&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>&lt;</span>&nbsp;j;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(&nbsp;<span class='code_operator'>!</span>(frames[i]<span class='code_operator'>&</span>toTest)&nbsp;)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;i<span class='code_operator'>*</span><span class='code_integer'>4</span><span class='code_operator'>*</span><span class='code_integer'>8</span><span class='code_operator'>+</span>j;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+}
+</div>
+</p>
+<p>Hopefully that code shouldn't cause too many surprises. It just fancy bit twiddling. We then come to functions to allocate and deallocate frames. Now that we have an efficient bitset implementation, these functions total just a few lines!
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Function to allocate a frame.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>alloc_frame</span>(<span class='code_typedef'>page_t</span>&nbsp;<span class='code_operator'>*</span>page,&nbsp;<span class='code_primitive'>int</span>&nbsp;is_kernel,&nbsp;<span class='code_primitive'>int</span>&nbsp;is_writeable)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(page<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>frame&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>;&nbsp;<span class='code_comment'>// Frame was already allocated, return straight away.</span><br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;idx&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>first_frame</span>();&nbsp;<span class='code_comment'>// idx is now the index of the first free frame.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(idx&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)<span class='code_operator'>-</span><span class='code_integer'>1</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// PANIC is just a macro that prints a message to the screen then hits an infinite loop.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>PANIC</span>(<span class='code_string'>"No&nbsp;free&nbsp;frames!"</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>set_frame</span>(idx<span class='code_operator'>*</span><span class='code_integer'>0</span>x1000);&nbsp;<span class='code_comment'>// this frame is now ours!</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;page<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>present&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;&nbsp;<span class='code_comment'>// Mark it as present.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;page<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>rw&nbsp;<span class='code_operator'>=</span>&nbsp;(is_writeable)?<span class='code_integer'>1</span>:<span class='code_integer'>0</span>;&nbsp;<span class='code_comment'>// Should the page be writeable?</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;page<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>user&nbsp;<span class='code_operator'>=</span>&nbsp;(is_kernel)?<span class='code_integer'>0</span>:<span class='code_integer'>1</span>;&nbsp;<span class='code_comment'>// Should the page be user-mode?</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;page<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>frame&nbsp;<span class='code_operator'>=</span>&nbsp;idx;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+}<br/>
+<br/>
+<span class='code_comment'>// Function to deallocate a frame.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>free_frame</span>(<span class='code_typedef'>page_t</span>&nbsp;<span class='code_operator'>*</span>page)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;frame;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(<span class='code_operator'>!</span>(frame<span class='code_operator'>=</span>page<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>frame))<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>;&nbsp;<span class='code_comment'>// The given page didn't actually have an allocated frame!</span><br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>clear_frame</span>(frame);&nbsp;<span class='code_comment'>// Frame is now free again.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;page<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>frame&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x0;&nbsp;<span class='code_comment'>// Page now doesn't have a frame.</span><br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+}
+</div>
+</p>
+<p>Note that the PANIC macro just calls a global function called <i>panic</i>, with arguments of the message given and the __FILE__ and __LINE__ it occurred on. <i>panic</i> prints these out and enters an infinite loop, stopping all execution.
+</p>
+<p></p><h3>6.4.4. Paging code, finally!</h3>
+<p><div class='code'>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>initialise_paging</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The size of physical memory. For the moment we</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// assume it is 16MB big.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;mem_end_page&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000000;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;nframes&nbsp;<span class='code_operator'>=</span>&nbsp;mem_end_page&nbsp;<span class='code_operator'>/</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;frames&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc</span>(<span class='code_function'>INDEX_FROM_BIT</span>(nframes));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(frames,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_function'>INDEX_FROM_BIT</span>(nframes));<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Let's make a page directory.</span><br/>
+&nbsp;&nbsp;&nbsp;kernel_directory&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>page_directory_t</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc_a</span>(<span class='code_function'>sizeof</span>(<span class='code_typedef'>page_directory_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(kernel_directory,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>page_directory_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;current_directory&nbsp;<span class='code_operator'>=</span>&nbsp;kernel_directory;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We need to identity map (phys addr = virt addr) from</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// 0x0 to the end of used memory, so we can access this</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// transparently, as if paging wasn't enabled.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// NOTE that we use a while loop here deliberately.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// inside the loop body we actually change placement_address</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// by calling kmalloc(). A while loop causes this to be</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// computed on-the-fly rather than once at the start.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;placement_address)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Kernel code is readable but not writeable from userspace.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>alloc_frame</span>(&nbsp;<span class='code_function'>get_page</span>(i,&nbsp;<span class='code_integer'>1</span>,&nbsp;kernel_directory),&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Before we enable paging, we must register our page fault handler.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>register_interrupt_handler</span>(<span class='code_integer'>14</span>,&nbsp;page_fault);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Now, enable paging!</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>switch_page_directory</span>(kernel_directory);<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>switch_page_directory</span>(<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>dir)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;current_directory&nbsp;<span class='code_operator'>=</span>&nbsp;dir;<br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%0,&nbsp;%%cr3"</span>::&nbsp;<span class='code_string'>"r"</span>(<span class='code_operator'>&</span>dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tablesPhysical));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;cr0;<br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%%cr0,&nbsp;%0"</span>:&nbsp;<span class='code_string'>"=r"</span>(cr0));<br/>
+&nbsp;&nbsp;&nbsp;cr0&nbsp;<span class='code_operator'>|=</span>&nbsp;<span class='code_integer'>0</span>x80000000;&nbsp;<span class='code_comment'>// Enable paging!</span><br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%0,&nbsp;%%cr0"</span>::&nbsp;<span class='code_string'>"r"</span>(cr0));<br/>
+}<br/>
+<br/>
+<span class='code_typedef'>page_t</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>get_page</span>(<span class='code_primitive'>u32int</span>&nbsp;address,&nbsp;<span class='code_primitive'>int</span>&nbsp;make,&nbsp;<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>dir)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Turn the address into an index.</span><br/>
+&nbsp;&nbsp;&nbsp;address&nbsp;<span class='code_operator'>/=</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Find the page table containing this address.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;table_idx&nbsp;<span class='code_operator'>=</span>&nbsp;address&nbsp;<span class='code_operator'>/</span>&nbsp;<span class='code_integer'>1024</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[table_idx])&nbsp;<span class='code_comment'>// If this table is already assigned</span><br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_operator'>&</span>dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[table_idx]<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[address%<span class='code_integer'>1024</span>];<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span>&nbsp;<span class='code_primitive'>if</span>(make)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;tmp;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[table_idx]&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>page_table_t</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc_ap</span>(<span class='code_function'>sizeof</span>(<span class='code_typedef'>page_table_t</span>),&nbsp;<span class='code_operator'>&</span>tmp);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[table_idx],&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>x1000);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tablesPhysical[table_idx]&nbsp;<span class='code_operator'>=</span>&nbsp;tmp&nbsp;<span class='code_operator'>|</span>&nbsp;<span class='code_integer'>0</span>x7;&nbsp;<span class='code_comment'>// PRESENT, RW, US.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_operator'>&</span>dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[table_idx]<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[address%<span class='code_integer'>1024</span>];<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+}
+</div>
+</p>
+<p>Right, let's analyse that. First of all, the utility functions.
+</p>
+<p><i>switch_page_directory</i> does exactly what it says on the tin. It takes a page directory, and switches to it. It does this by moving the address of the tablesPhysical member of that directory into the CR3 register. Remember that the tablesPhysical member is an array of physical addresses. After that it first gets the contents of CR0, then OR-s the <i>PG</i> bit (0x80000000), then rewrites it. This enables paging and flushes the page-directory cache as well.
+</p>
+<p><i>get_page</i> returns a pointer to the page entry for a particular address. It can optionally be passed a parameter - make. If make is 1, and the page table that the requested page entry should reside in hasn't been created, then it will be created. Otherwise, the function would just return 0. So, if the table has already been assigned, it will look up the page entry and return it. If it hasn't (and make == 1), it will attempt to create it.
+</p>
+<p>It uses our <i>kmalloc_ap</i> function to retrieve a memory block which is page-aligned, and <i>also gets given it's physical location</i>. The physical location gets stored in 'tablesPhysical' (after several bits have been set telling the CPU that it is present, writeable, and user-accessible), and the virtual location is stored in 'tables'.
+</p>
+<p><i>initialise_paging</i> firstly creates the frames bitset, and sets everything to zero using memset. Then it allocates space (which is page-aligned) for a page directory. After that, it allocates frames such that any page access will map to the frame with the same linear address, called identity-mapping. This is done for a small section of the address space, so the kernel code can continue to run as normal. It registers an interrupt handler for page faults (below) then enables paging.
+</p>
+<p></p><h3>6.4.5. The page fault handler</h3>
+<p><div class='code'>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>page_fault</span>(<span class='code_typedef'>registers_t</span>&nbsp;regs)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// A page fault has occurred.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The faulting address is stored in the CR2 register.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;faulting_address;<br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%%cr2,&nbsp;%0"</span>&nbsp;:&nbsp;<span class='code_string'>"=r"</span>&nbsp;(faulting_address));<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The error code gives us details of what happened.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;present&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>!</span>(regs.err_code&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>x1);&nbsp;<span class='code_comment'>// Page not present</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;rw&nbsp;<span class='code_operator'>=</span>&nbsp;regs.err_code&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>x2;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Write operation?</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;us&nbsp;<span class='code_operator'>=</span>&nbsp;regs.err_code&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>x4;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Processor was in user-mode?</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;reserved&nbsp;<span class='code_operator'>=</span>&nbsp;regs.err_code&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>x8;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Overwritten CPU-reserved bits of page entry?</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;id&nbsp;<span class='code_operator'>=</span>&nbsp;regs.err_code&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>x10;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Caused by an instruction fetch?</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Output an error message.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"Page&nbsp;fault!&nbsp;(&nbsp;"</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(present)&nbsp;{<span class='code_function'>monitor_write</span>(<span class='code_string'>"present&nbsp;"</span>);}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(rw)&nbsp;{<span class='code_function'>monitor_write</span>(<span class='code_string'>"read-only&nbsp;"</span>);}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(us)&nbsp;{<span class='code_function'>monitor_write</span>(<span class='code_string'>"user-mode&nbsp;"</span>);}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(reserved)&nbsp;{<span class='code_function'>monitor_write</span>(<span class='code_string'>"reserved&nbsp;"</span>);}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>")&nbsp;at&nbsp;0x"</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write_hex</span>(faulting_address);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\n</span>"</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>PANIC</span>(<span class='code_string'>"Page&nbsp;fault"</span>);<br/>
+}
+</div>
+</p>
+<p>All this handler does is print out a nice error message. It gets the faulting address from CR2, and analyses the error code pushed by the processor to glean some information from it.
+</p>
+<p></p><h3>6.4.6. Testing</h3>
+<p>Awesome! you now have code that enables paging and handles page faults! Let's just check it actually works, shall we ...?
+</p>
+<p><i>main.c</i>
+<div class='code'>
+<span class='code_primitive'>int</span>&nbsp;<span class='code_function'>main</span>(<span class='code_primitive'>struct</span>&nbsp;multiboot&nbsp;<span class='code_operator'>*</span>mboot_ptr)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise all the ISRs and segmentation</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>init_descriptor_tables</span>();<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the screen (by clearing it)</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_clear</span>();<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>initialise_paging</span>();<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"Hello,&nbsp;paging&nbsp;world!<span class='code_character'>\n</span>"</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_operator'>*</span>ptr&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span><span class='code_operator'>*</span>)<span class='code_integer'>0</span>xA0000000;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;do_page_fault&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>*</span>ptr;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+}
+</div>
+</p>
+<p><div class='image_frame'><img src='images/paging_bochs.png' /><br/><span class='image_caption'>Bochs, enabling paging then forcing a page fault</span></div>This will, obviously, initialise paging, print a string to make sure it's set up right and not faulting when it shoudn't, and then force a page fault by reading location 0xA0000000.
+</p>
+<p>Congrats! you're all done! you can now move on to the next tutorial - making a working kernel heap :D. The source code for this tutorial is available <a href='/downloads/paging.tar.gz'>here</a>.
+</p></div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+</body></html>

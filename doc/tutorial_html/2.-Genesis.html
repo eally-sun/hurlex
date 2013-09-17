@@ -1,0 +1,257 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><title>2.-Genesis</title><link rel='stylesheet' type='text/css' href='css/highlight.css'><link rel='stylesheet' type='text/css' href='css/layout.css'></head><body><div class="header">
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="index.html">Home</a> &raquo;
+	 	JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+
+<div class='index'>
+<a href='1.-Environment setup.html'>1. Environment setup</a><br/><a href='2.-Genesis.html' class='selected' >2. Genesis</a><br/><a href='3.-The Screen.html'>3. The Screen</a><br/><a href='4.-The GDT and IDT.html'>4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html'>5. IRQs and the PIT</a><br/><a href='6.-Paging.html'>6. Paging</a><br/><a href='7.-The Heap.html'>7. The Heap</a><br/><a href='8.-The VFS and the initrd.html'>8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html'>9. Multitasking</a><br/><a href='10.-User Mode.html'>10. User Mode</a><br/></div>
+<h1>2. Genesis</h1>
+<p></p><h2>2.1. The boot code</h2>
+<p>OK, It's time for some code! Although the brunt of our kernel will be
+written in C, there are certain things we just <i>must</i> use assembly
+for. One of those things is the initial boot code.
+</p>
+<p>Here we go:
+</p>
+<p><div class='code'>
+<span class='code_comment'>;</span><br/>
+<span class='code_comment'>; boot.s -- Kernel start location. Also defines multiboot header.</span><br/>
+<span class='code_comment'>;           Based on Bran's kernel development tutorial file start.asm</span><br/>
+<span class='code_comment'>;</span><br/>
+<br/>
+MBOOT_PAGE_ALIGN&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>equ</span>&nbsp;1<<0&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Load kernel and modules on a page boundary</span><br/>
+MBOOT_MEM_INFO&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>equ</span>&nbsp;1<<1&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Provide your kernel with memory info</span><br/>
+MBOOT_HEADER_MAGIC&nbsp;&nbsp;<span class='code_primitive'>equ</span>&nbsp;0x1BADB002&nbsp;<span class='code_comment'>; Multiboot Magic value</span><br/>
+<span class='code_comment'>; NOTE: We do not use MBOOT_AOUT_KLUDGE. It means that GRUB does not</span><br/>
+<span class='code_comment'>; pass us a symbol table.</span><br/>
+MBOOT_HEADER_FLAGS&nbsp;&nbsp;<span class='code_primitive'>equ</span>&nbsp;MBOOT_PAGE_ALIGN&nbsp;|&nbsp;MBOOT_MEM_INFO<br/>
+MBOOT_CHECKSUM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>equ</span>&nbsp;-(MBOOT_HEADER_MAGIC&nbsp;+&nbsp;MBOOT_HEADER_FLAGS)<br/>
+<br/>
+<br/>
+[<span class='code_primitive'>BITS</span>&nbsp;32]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; All instructions should be 32-bit.</span><br/>
+<br/>
+[<span class='code_primitive'>GLOBAL</span>&nbsp;mboot]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Make 'mboot' accessible from C.</span><br/>
+[<span class='code_primitive'>EXTERN</span>&nbsp;code]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Start of the '.text' section.</span><br/>
+[<span class='code_primitive'>EXTERN</span>&nbsp;bss]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Start of the .bss section.</span><br/>
+[<span class='code_primitive'>EXTERN</span>&nbsp;end]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; End of the last loadable section.</span><br/>
+<br/>
+<span class='code_label'>mboot:</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>dd</span>&nbsp;&nbsp;MBOOT_HEADER_MAGIC&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; GRUB will search for this value on each</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; 4-byte boundary in your kernel file</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>dd</span>&nbsp;&nbsp;MBOOT_HEADER_FLAGS&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; How GRUB should load your file / settings</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>dd</span>&nbsp;&nbsp;MBOOT_CHECKSUM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; To ensure that the above values are correct</span><br/>
+&nbsp;&nbsp;&nbsp;<br/>
+&nbsp;&nbsp;<span class='code_operator'>dd</span>&nbsp;&nbsp;mboot&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Location of this descriptor</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>dd</span>&nbsp;&nbsp;code&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Start of kernel '.text' (code) section.</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>dd</span>&nbsp;&nbsp;bss&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; End of kernel '.data' section.</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>dd</span>&nbsp;&nbsp;end&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; End of kernel.</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>dd</span>&nbsp;&nbsp;start&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Kernel entry point (initial EIP).</span><br/>
+<br/>
+[<span class='code_primitive'>GLOBAL</span>&nbsp;start]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Kernel entry point.</span><br/>
+[<span class='code_primitive'>EXTERN</span>&nbsp;main]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; This is the entry point of our C code</span><br/>
+<br/>
+<span class='code_label'>start:</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;&nbsp;&nbsp;&nbsp;ebx&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Load multiboot header location</span><br/>
+<br/>
+&nbsp;&nbsp;<span class='code_comment'>; Execute the kernel:</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>cli</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Disable interrupts.</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>call</span>&nbsp;main&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; call our main() function.</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>jmp</span>&nbsp;$&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Enter an infinite loop, to stop the processor</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; executing whatever rubbish is in the memory</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; after our kernel!</span>
+</div>
+</p>
+<p></p><h2>2.2. Understanding the boot code</h2>
+<p>There's actually only a few lines of code in that snippet:
+<div class='code'>
+<span class='code_operator'>push</span>&nbsp;ebx<br/>
+<span class='code_operator'>cli</span><br/>
+<span class='code_operator'>call</span>&nbsp;main<br/>
+<span class='code_operator'>jmp</span>&nbsp;$
+</div>
+The rest of it is all to do with the <i>multiboot header</i>.
+</p>
+<p></p><h3>2.2.1. Multiboot</h3>
+<p>Multiboot is a standard to which GRUB expects a kernel to comply. It
+is a way for the bootloader to
+<ol>
+<li>Know exactly what environment the kernel wants/needs when it boots.</li>
+<li>Allow the kernel to query the environment it is in.</li>
+</ol>
+So, for example, if your kernel needs to be loaded in a specific VESA
+mode (which is a bad idea, by the way), you can inform the bootloader
+of this, and it can take care of it for you.
+</p>
+<p>To make your kernel multiboot compatible, you need to add a header
+structure somewhere in your kernel (Actually, the header must be in
+the first 4KB of the kernel). Usefully, there is a NASM command that
+lets us embed specific constants in our code - 'dd'. These lines:
+<div class='code'>
+<span class='code_operator'>dd</span>&nbsp;MBOOT_HEADER_MAGIC<br/>
+<span class='code_operator'>dd</span>&nbsp;MBOOT_HEADER_FLAGS<br/>
+<span class='code_operator'>dd</span>&nbsp;MBOOT_CHECKSUM<br/>
+<span class='code_operator'>dd</span>&nbsp;mboot<br/>
+<span class='code_operator'>dd</span>&nbsp;code<br/>
+<span class='code_operator'>dd</span>&nbsp;bss<br/>
+<span class='code_operator'>dd</span>&nbsp;end<br/>
+<span class='code_operator'>dd</span>&nbsp;start
+</div>
+</p>
+<p>Do just that. The MBOOT_* constants are defined above.
+</p>
+<p><b>MBOOT_HEADER_MAGIC</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;A magic number. This identifies the kernel as multiboot-compatible.<br/>
+</p>
+<p><b>MBOOT_HEADER_FLAGS</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;A field of flags. We ask for GRUB to page-align all kernel sections<br/>
+(MBOOT_PAGE_ALIGN) and also to give us some memory information
+(MBOOT_MEM_INFO). Note that some tutorials also use
+MBOOT_AOUT_KLUDGE. As we are using the ELF file format, this hack is
+not necessary, and adding it stops GRUB giving you your symbol table
+when you boot up.
+</p>
+<p><b>MBOOT_CHECKSUM</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;This field is defined such that when the magic number, the flags and<br/>
+this are added together, the total must be zero. It is for error
+checking.
+</p>
+<p><b>mboot</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;The address of the structure that we are currently writing. GRUB uses<br/>
+this to tell if we are expecting to be relocated.
+</p>
+<p><b>code,bss,end,start</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;These symbols are all defined by the linker. We use them to tell GRUB<br/>
+where the different sections of our kernel can be located.
+</p>
+<p>On bootup, GRUB will load a pointer to another information structure
+into the EBX register. This can be used to query the environment GRUB
+set up for us.
+</p>
+<p></p><h3>2.2.2. Back to the code again...</h3>
+<p>So, immediately on bootup, the asm snippet tells the CPU to push the
+contents of EBX onto the stack (remember that EBX now contains a
+pointer to the multiboot information structure), disable interrupts
+(CLI), call our 'main' C function (which we haven't defined yet), then
+enter an infinite loop.
+</p>
+<p>All is good, but the code won't link yet. We haven't defined main()!
+</p>
+<p></p><h2>2.3. Adding some C code</h2>
+<p>Interfacing C code and assembly is dead easy. You just have to
+know the calling convention used. GCC on x86 uses the __cdecl calling
+convention:
+</p>
+<p><ul>
+<li>All parameters to a function are passed on the stack.</li>
+<li>The parameters are pushed <i>right-to-left</i>.</li>
+<li>The return value of a function is returned in EAX.</li>
+</ul>
+</p>
+<p>...so the function call:
+<div class='code'>
+d&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>func</span>(a,&nbsp;b,&nbsp;c);
+</div>
+</p>
+<p>Becomes:
+<div class='code'>
+<span class='code_operator'>push</span>&nbsp;[c]<br/>
+<span class='code_operator'>push</span>&nbsp;[b]<br/>
+<span class='code_operator'>push</span>&nbsp;[a]<br/>
+<span class='code_operator'>call</span>&nbsp;func<br/>
+<span class='code_operator'>mov</span>&nbsp;[d],&nbsp;eax
+</div>
+</p>
+<p>See? nothing to it! So, you can see that in our asm snippet above,
+that 'push ebx' is actually passing the value of ebx as a parameter to
+the function main().
+</p>
+<p></p><h3>2.3.1. The C code</h3>
+<p><div class='code'>
+<span class='code_comment'>// main.c -- Defines the C-code kernel entry point, calls initialisation routines.</span><br/>
+<span class='code_comment'>//           Made for JamesM's tutorials <www.jamesmolloy.co.uk></span><br/>
+<br/>
+<span class='code_primitive'>int</span>&nbsp;<span class='code_function'>main</span>(<span class='code_primitive'>struct</span>&nbsp;multiboot&nbsp;<span class='code_operator'>*</span>mboot_ptr)<br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_comment'>// All our initialisation calls will go in here.</span><br/>
+&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>xDEADBABA;<br/>
+}
+</div>
+</p>
+<p>Here's our first incarnation of the main() function. As you can see,
+we've made it take one parameter - a pointer to a multiboot
+struct. We'll define that later (we don't actually need to define it
+for the code to compile!).
+</p>
+<p>All the function does is return a constant - 0xDEADBABA. That constant
+is unusual enough that it should stand out at you when we run the
+program in a second.
+</p>
+<p></p><h2>2.4. Compiling, linking and running!</h2>
+<p>Now that we've added a new file to our project, we have to add it to
+the makefile also. Edit these lines:
+<div class='code'>
+<span class='code_variable'>SOURCES</span>=boot.o<br/>
+<span class='code_variable'>CFLAGS</span>=
+</div>
+</p>
+<p>To become:
+<div class='code'>
+<span class='code_variable'>SOURCES</span>=boot.o&nbsp;main.o<br/>
+<span class='code_variable'>CFLAGS</span>=-nostdlib&nbsp;-nostdinc&nbsp;-fno-builtin&nbsp;-fno-stack-protector
+</div>
+</p>
+<p>We must stop GCC trying to link your linux C library with our kernel -
+it won't work at all (yet). That's what those CFLAGS are for.
+</p>
+<p>OK, you should now be able to compile, link and run your kernel!
+</p>
+<p><div class='code'>
+<span 
+class='code_primitive'>cd</span>&nbsp;src<br/>
+make&nbsp;clean&nbsp;&nbsp;<span class='code_comment'># Ignore any errors here.</span><br/>
+make<br/>
+<span 
+class='code_primitive'>cd</span>&nbsp;..<br/>
+./update_image.sh<br/>
+./run_bochs.sh&nbsp;&nbsp;<span class='code_comment'># This may ask your for your root password.</span>
+</div>
+</p>
+<p>That should cause bochs to boot, you'll see GRUB for a few seconds
+then the kernel will run. It doesn't actually <i>do</i> anything, so
+it'll just freeze, saying 'starting up...'.
+</p>
+<p>If you open bochsout.txt, at the bottom you should see something like:
+</p>
+<p><div class='code'>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;EAX=deadbaba&nbsp;&nbsp;EBX=0002d000&nbsp;&nbsp;ECX=0001edd0&nbsp;EDX=00000001<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;ESP=00067ec8&nbsp;&nbsp;EBP=00067ee0&nbsp;&nbsp;ESI=00053c76&nbsp;EDI=00053c77<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;IOPL=0&nbsp;id&nbsp;vip&nbsp;vif&nbsp;ac&nbsp;vm&nbsp;rf&nbsp;nt&nbsp;of&nbsp;df&nbsp;if&nbsp;tf&nbsp;sf&nbsp;zf&nbsp;af&nbsp;pf&nbsp;cf<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;SEG&nbsp;selector&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;base&nbsp;&nbsp;&nbsp;&nbsp;limit&nbsp;G&nbsp;D<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;SEG&nbsp;sltr(index|ti|rpl)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;base&nbsp;&nbsp;&nbsp;&nbsp;limit&nbsp;G&nbsp;D<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;&nbsp;CS:0008(&nbsp;0001|&nbsp;0|&nbsp;&nbsp;0)&nbsp;00000000&nbsp;000fffff&nbsp;1&nbsp;1<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;&nbsp;DS:0010(&nbsp;0002|&nbsp;0|&nbsp;&nbsp;0)&nbsp;00000000&nbsp;000fffff&nbsp;1&nbsp;1<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;&nbsp;SS:0010(&nbsp;0002|&nbsp;0|&nbsp;&nbsp;0)&nbsp;00000000&nbsp;000fffff&nbsp;1&nbsp;1<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;&nbsp;ES:0010(&nbsp;0002|&nbsp;0|&nbsp;&nbsp;0)&nbsp;00000000&nbsp;000fffff&nbsp;1&nbsp;1<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;&nbsp;FS:0010(&nbsp;0002|&nbsp;0|&nbsp;&nbsp;0)&nbsp;00000000&nbsp;000fffff&nbsp;1&nbsp;1<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;&nbsp;GS:0010(&nbsp;0002|&nbsp;0|&nbsp;&nbsp;0)&nbsp;00000000&nbsp;000fffff&nbsp;1&nbsp;1<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;EIP=00100027&nbsp;(00100027)<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;CR0=0x00000011&nbsp;CR1=0&nbsp;CR2=0x00000000<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;|&nbsp;CR3=0x00000000&nbsp;CR4=0x00000000<br/>
+00074621500i[CPU&nbsp;&nbsp;]&nbsp;&gt;&gt;&nbsp;jmp&nbsp;.+0xfffffffe&nbsp;(0x00100027)&nbsp;:&nbsp;EBFE
+</div>
+</p>
+<p><div class='image_frame'><img src='images/genesis_bochs.png' /><br/><span class='image_caption'>Bochs booting your kernel</span></div>
+Notice what the value of EAX is? 0xDEADBABA - the return value of
+main(). Congratulations, you now have a multiboot compatible assembly
+trampoline, and you're ready to start printing to the screen!
+</p>
+<p>Sample code for this tutorial can be found
+<a href='/downloads/genesis.tar'>here</a>
+</p></div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+</body></html>

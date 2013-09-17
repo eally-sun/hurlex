@@ -1,0 +1,597 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><title>4.-The GDT and IDT</title><link rel='stylesheet' type='text/css' href='css/highlight.css'><link rel='stylesheet' type='text/css' href='css/layout.css'></head><body><div class="header">
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="index.html">Home</a> &raquo;
+	 	JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+
+<div class='index'>
+<a href='1.-Environment setup.html'>1. Environment setup</a><br/><a href='2.-Genesis.html'>2. Genesis</a><br/><a href='3.-The Screen.html'>3. The Screen</a><br/><a href='4.-The GDT and IDT.html' class='selected' >4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html'>5. IRQs and the PIT</a><br/><a href='6.-Paging.html'>6. Paging</a><br/><a href='7.-The Heap.html'>7. The Heap</a><br/><a href='8.-The VFS and the initrd.html'>8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html'>9. Multitasking</a><br/><a href='10.-User Mode.html'>10. User Mode</a><br/></div>
+<h1>4. The GDT and IDT</h1>
+<p>The GDT and the IDT are descriptor tables. They are arrays of flags
+and bit values describing the operation of either the segmentation
+system (in the case of the GDT), or the interrupt vector table (IDT).
+</p>
+<p>They are, unfortunately, a little theory-heavy, but bear with it
+because it'll be over soon!
+</p>
+<p></p><h2>4.1. The Global Descriptor Table (theory)</h2>
+<p>The x86 architecture has two methods of memory protection and of
+providing virtual memory - segmentation and paging.
+</p>
+<p>With segmentation, every memory access is evaluated with respect to a
+segment. That is, the memory address is added to the segment's base
+address, and checked against the segment's length. You can think of a
+segment as a window into the address space - The process does not know
+it's a window, all it sees is a linear address space starting at zero
+and going up to the segment length.
+</p>
+<p>With paging, the address space is split into (usually 4KB, but this can
+change) blocks, called pages. Each page can be mapped into physical
+memory - mapped onto what is called a 'frame'. Or, it can be
+unmapped. Like this you can create virtual memory spaces.
+</p>
+<p>Both of these methods have their advantages, but paging is much
+better. Segmentation is, although still usable, fast becoming obsolete
+as a method of memory protection and virtual memory. In fact, the
+x86-64 architecture requires a flat memory model (one segment with a
+base of 0 and a limit of 0xFFFFFFFF) for some of it's instructions to
+operate properly.
+</p>
+<p>Segmentation is, however, totally in-built into the x86
+architecture. It's impossible to get around it. So here we're going to
+show you how to set up your own Global Descriptor Table - a list of
+segment descriptors.
+</p>
+<p>As mentioned before, we're going to try and set up a flat memory
+model. The segment's window should start at 0x00000000 and extend to
+0xFFFFFFFF (the end of memory). However, there is one thing that
+segmentation can do that paging can't, and that's <i>set the ring level</i>. 
+</p>
+<p>A ring is a privilege level - zero being the most privileged,
+and three being the least. Processes in ring zero are said to be
+running in <i>kernel-mode</i>, or <i>supervisor-mode</i>, because they can
+use instructions like <i>sti</i> and <i>cli</i>, something which most
+processes can't. Normally, rings 1 and 2 are unused. They can,
+technically, access a greater subset of the supervisor-mode
+instructions than ring 3 can. Some microkernel architectures use these
+for running <i>server processes</i>, or drivers.
+</p>
+<p>A segment descriptor carries inside it a number
+representing the ring level it applies to. To change ring levels
+(which we'll do later on), among other things, we need segments that
+represent both ring 0 and ring 3.<sup><a class='reference' href='references.html#3.2.4'>[3.2.4]</a></sup>
+</p>
+<p></p><h2>4.2. The Global Descriptor Table (practical)</h2>
+<p><div class='image_frame'><img src='images/gdt_idt_gdt_format_2.png' /><br/><span class='image_caption'>Access byte format</span></div> OK, that was one humungous chunk
+of theory, lets get into the nitty gritty of implementing this.
+</p>
+<p>One thing I forgot to mention is that GRUB sets a GDT up for you. The
+problem is that you don't know where that GDT is, or what's in it. So
+you could accidentally overwrite it, then your computer would
+triple-fault and reset. Not clever.
+</p>
+<p>In the x86, we have 6 segmentation registers. Each holds an offset
+into the GDT. They are cs (code segment), ds (data segment), es (extra
+segment), fs, gs, ss (stack segment). The code segment <i>must</i>
+reference a descriptor which is set as a 'code segment'. There is a
+flag for this in the access byte. The rest should all reference a
+descriptor which is set as a 'data segment'.
+</p>
+<p></p><h3>4.2.1. descriptor_tables.h</h3>
+<p>A GDT entry looks like this:
+<div class='code'>
+<span class='code_comment'>// This structure contains the value of one GDT entry.</span><br/>
+<span class='code_comment'>// We use the attribute 'packed' to tell GCC not to change</span><br/>
+<span class='code_comment'>// any of the alignment in the structure.</span><br/>
+<span class='code_primitive'>struct</span>&nbsp;gdt_entry_struct<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;limit_low;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The lower 16 bits of the limit.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;base_low;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The lower 16 bits of the base.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;&nbsp;base_middle;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The next 8 bits of the base.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;&nbsp;access;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Access flags, determine what ring this segment can be used in.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;&nbsp;granularity;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;&nbsp;base_high;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The last 8 bits of the base.</span><br/>
+}&nbsp;<span class='code_function'>__attribute__</span>((packed));<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;gdt_entry_struct&nbsp;<span class='code_typedef'>gdt_entry_t</span>;
+</div>
+</p>
+<p><div class='image_frame'><img src='images/gdt_idt_gdt_format_1.png' /><br/><span class='image_caption'>Granularity byte format</span></div> Most of those fields should be
+self-explanatory. The format of the access byte is given on the right
+above, and the format of the granularity byte is here on the right.
+</p>
+<p><b>P</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Is segment present? (1 = Yes)<br/>
+<b>DPL</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Descriptor privilege level - Ring 0 - 3.<br/>
+<b>DT</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Descriptor type<br/>
+<b>Type</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Segment type - code segment / data segment.<br/>
+<b>G</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Granularity (0 = 1 byte, 1 = 1kbyte)<br/>
+<b>D</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Operand size (0 = 16bit, 1 = 32bit)<br/>
+<b>0</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Should always be zero.<br/>
+<b>A</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Available for system use (always zero).<br/>
+</p>
+<p>To tell the processor where to find our GDT, we have to give it the
+address of a special pointer structure:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>struct</span>&nbsp;gdt_ptr_struct<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;limit;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The upper 16 bits of all selector limits.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;base;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The address of the first gdt_entry_t struct.</span><br/>
+}<br/>
+&nbsp;<span class='code_function'>__attribute__</span>((packed));<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;gdt_ptr_struct&nbsp;<span class='code_typedef'>gdt_ptr_t</span>;
+</div>
+</p>
+<p>The base is the address of the first entry in our GDT, the limit being
+the size of the table minus one (the last valid address in the table).
+</p>
+<p>Those struct definitions should go in a header file,
+descriptor_tables.h, along with a prototype.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Initialisation function is publicly accessible.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_descriptor_tables</span>();
+</div>
+</p>
+<p></p><h3>4.2.2. descriptor_tables.c</h3>
+<p>In descriptor_tables.c, we have a few declarations:
+</p>
+<p><div class='code'>
+<span class='code_comment'>//</span><br/>
+<span class='code_comment'>// descriptor_tables.c - Initialises the GDT and IDT, and defines the </span><br/>
+<span class='code_comment'>//                       default ISR and IRQ handler.</span><br/>
+<span class='code_comment'>//                       Based on code from Bran's kernel development tutorials.</span><br/>
+<span class='code_comment'>//                       Rewritten for JamesM's kernel development tutorials.</span><br/>
+<span class='code_comment'>//</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"descriptor_tables.h"<br/>
+</span><br/>
+<span class='code_comment'>// Lets us access our ASM functions from our C code.</span><br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>gdt_flush</span>(<span class='code_primitive'>u32int</span>);<br/>
+<br/>
+<span class='code_comment'>// Internal function prototypes.</span><br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_gdt</span>();<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_primitive'>s32int</span>,<span class='code_primitive'>u32int</span>,<span class='code_primitive'>u32int</span>,<span class='code_primitive'>u8int</span>,<span class='code_primitive'>u8int</span>);<br/>
+<br/>
+<span class='code_typedef'>gdt_entry_t</span>&nbsp;gdt_entries[<span class='code_integer'>5</span>];<br/>
+<span class='code_typedef'>gdt_ptr_t</span>&nbsp;&nbsp;&nbsp;gdt_ptr;<br/>
+<span class='code_typedef'>idt_entry_t</span>&nbsp;idt_entries[<span class='code_integer'>256</span>];<br/>
+<span class='code_typedef'>idt_ptr_t</span>&nbsp;&nbsp;&nbsp;idt_ptr;
+</div>
+</p>
+<p>Notice the gdt_flush function - this will be defined in an ASM file,
+and will load our GDT pointer for us.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Initialisation routine - zeroes all the interrupt service routines,</span><br/>
+<span class='code_comment'>// initialises the GDT and IDT.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_descriptor_tables</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the global descriptor table.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>init_gdt</span>();<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_gdt</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;gdt_ptr.limit&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_function'>sizeof</span>(<span class='code_typedef'>gdt_entry_t</span>)&nbsp;<span class='code_operator'>*</span>&nbsp;<span class='code_integer'>5</span>)&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;gdt_ptr.base&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)<span class='code_operator'>&</span>gdt_entries;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Null segment</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_integer'>1</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>xFFFFFFFF,&nbsp;<span class='code_integer'>0</span>x9A,&nbsp;<span class='code_integer'>0</span>xCF);&nbsp;<span class='code_comment'>// Code segment</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_integer'>2</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>xFFFFFFFF,&nbsp;<span class='code_integer'>0</span>x92,&nbsp;<span class='code_integer'>0</span>xCF);&nbsp;<span class='code_comment'>// Data segment</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_integer'>3</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>xFFFFFFFF,&nbsp;<span class='code_integer'>0</span>xFA,&nbsp;<span class='code_integer'>0</span>xCF);&nbsp;<span class='code_comment'>// User mode code segment</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_integer'>4</span>,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>xFFFFFFFF,&nbsp;<span class='code_integer'>0</span>xF2,&nbsp;<span class='code_integer'>0</span>xCF);&nbsp;<span class='code_comment'>// User mode data segment</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>gdt_flush</span>((<span class='code_primitive'>u32int</span>)<span class='code_operator'>&</span>gdt_ptr);<br/>
+}<br/>
+<br/>
+<span class='code_comment'>// Set the value of one GDT entry.</span><br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>gdt_set_gate</span>(<span class='code_primitive'>s32int</span>&nbsp;num,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;base,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;limit,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;access,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;gran)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;gdt_entries[num].base_low&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;(base&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFFFF);<br/>
+&nbsp;&nbsp;&nbsp;gdt_entries[num].base_middle&nbsp;<span class='code_operator'>=</span>&nbsp;(base&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>&gt;</span>&nbsp;<span class='code_integer'>16</span>)&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFF;<br/>
+&nbsp;&nbsp;&nbsp;gdt_entries[num].base_high&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;(base&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>&gt;</span>&nbsp;<span class='code_integer'>24</span>)&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFF;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;gdt_entries[num].limit_low&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;(limit&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFFFF);<br/>
+&nbsp;&nbsp;&nbsp;gdt_entries[num].granularity&nbsp;<span class='code_operator'>=</span>&nbsp;(limit&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>&gt;</span>&nbsp;<span class='code_integer'>16</span>)&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>x0F;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;gdt_entries[num].granularity&nbsp;<span class='code_operator'>|=</span>&nbsp;gran&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xF0;<br/>
+&nbsp;&nbsp;&nbsp;gdt_entries[num].access&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;access;<br/>
+}
+</div>
+</p>
+<p>Lets just analyse that code for a moment. init_gdt initially sets up
+the gdt pointer structure - the limit is the size of each gdt entry *
+5 - we have 5 entries. Why 5? well, we have a code and data segment
+descriptor for the kernel, code and data segment descriptors for user
+mode, and a null entry. This <i>must</i> be present, or bad things will
+happen.
+</p>
+<p>gdt_init then sets up the 5 descriptors, by calling
+gdt_set_gate. gdt_set_gate just does some severe bit-twiddling and
+shifting, and should be self-explanatory with a hard stare at it.
+Notice that the only thing that changes between the 4 segment
+descriptors is the access byte - 0x9A, 0x92, 0xFA, 0xF2. You can see,
+if you map out the bits and compare them to the format diagram above,
+the bits that are changing are the type and DPL fields. DPL is the
+descriptor privilege level - 3 for user code and 0 for kernel
+code. Type specifies whether the segment is a code segment or a data
+segment (the processor checks this often, and can be the source of
+much frustration).
+</p>
+<p>Finally, we have our ASM function that will write the GDT
+pointer.
+</p>
+<p><div class='code'>
+[<span class='code_primitive'>GLOBAL</span>&nbsp;gdt_flush]&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Allows the C code to call gdt_flush().</span><br/>
+<br/>
+<span class='code_label'>gdt_flush:</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;eax,&nbsp;[esp+4]&nbsp;&nbsp;<span class='code_comment'>; Get the pointer to the GDT, passed as a parameter.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>lgdt</span>&nbsp;[eax]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Load the new GDT pointer</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ax,&nbsp;0x10&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; 0x10 is the offset in the GDT to our data segment</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ds,&nbsp;ax&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Load all data segment selectors</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;es,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;fs,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;gs,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ss,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>jmp</span>&nbsp;0x08:.flush&nbsp;&nbsp;&nbsp;<span class='code_comment'>; 0x08 is the offset to our code segment: Far jump!</span><br/>
+<span class='code_label'>.flush:</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>ret</span>
+</div>
+</p>
+<p>This function takes the first parameter passed to it (in esp+4), loads
+the value is points to into the GDT (using the lgdt instruction), then
+loads the segment selectors for the data and code segments. Notice
+that each GDT entry is 8 bytes, and the kernel code descriptor is the
+second segment, so it's offset is 0x08. Likewise the kernel data
+descriptor is the third, so it's offset is 16 = 0x10. Here we move the
+value 0x10 into the data segment registers ds,es,fd,gs,ss. To change
+the code segment is slightly different; we must do a far jump. This
+changes the CS implicitly.
+</p>
+<p></p><h2>4.3. The Interrupt Descriptor Table (theory)</h2>
+<p>There are times when you want to interrupt the processor. You want to
+stop it doing what it is doing, and force it to do something
+different. An example of this is when an timer or keyboard
+interrupt request (IRQ) fires. An interrupt is like a POSIX
+signal - it tells you that something of interest has happened. The
+processor can register 'signal handlers' (interrupt handlers) that deal
+with the interrupt, then return to the code that was running before it
+fired. Interrupts can be fired externally, via IRQs, or internally,
+via the 'int n' instruction. There are very useful reasons for wanting
+to do fire interrupts from software, but that's for another chapter!
+</p>
+<p>The <i>Interrupt Descriptor Table</i> tells the processor where to find
+handlers for each interrupt. It is very similar to the GDT. It is just
+an array of entries, each one corresponding to an interrupt
+number. There are 256 possible interrupt numbers, so 256 must be
+defined. If an interrupt occurs and there is no entry for it (even a
+NULL entry is fine), the processor will panic and reset.
+</p>
+<p></p><h3>4.3.1. Faults, traps and exceptions</h3>
+<p>The processor will sometimes need to signal your kernel. Something major may have happened, such as a divide-by-zero, or a page fault. To do this, it uses the first 32 interrupts. It is therefore doubly important that all of these are mapped and non-NULL - else the CPU will triple-fault and reset (bochs will panic with an 'unhandled exception' error).
+</p>
+<p>The special, CPU-dedicated interrupts are shown below.
+<ul>
+<li>0 - Division by zero exception</li>
+<li>1 - Debug exception</li>
+<li>2 - Non maskable interrupt</li>
+<li>3 - Breakpoint exception</li>
+<li>4 - 'Into detected overflow'</li>
+<li>5 - Out of bounds exception</li>
+<li>6 - Invalid opcode exception</li>
+<li>7 - No coprocessor exception</li>
+<li>8 - Double fault <i>(pushes an error code)</i></li>
+<li>9 - Coprocessor segment overrun</li>
+<li>10 - Bad TSS <i>(pushes an error code)</i></li>
+<li>11 - Segment not present <i>(pushes an error code)</i></li>
+<li>12 - Stack fault <i>(pushes an error code)</i></li>
+<li>13 - General protection fault <i>(pushes an error code)</i></li>
+<li>14 - Page fault <i>(pushes an error code)</i></li>
+<li>15 - Unknown interrupt exception</li>
+<li>16 - Coprocessor fault</li>
+<li>17 - Alignment check exception</li>
+<li>18 - Machine check exception</li>
+<li>19-31 - Reserved</li>
+</ul>
+</p>
+<p></p><h2>4.4. The Interrupt Descriptor Table (practice)</h2>
+<p></p><h3>4.4.1. descriptor_tables.h</h3>
+<p>We should add some definitions to descriptor_tables.h:
+</p>
+<p><div class='code'>
+<span class='code_comment'>// A struct describing an interrupt gate.</span><br/>
+<span class='code_primitive'>struct</span>&nbsp;idt_entry_struct<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;base_lo;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The lower 16 bits of the address to jump to when this interrupt fires.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;sel;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Kernel segment selector.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;&nbsp;always0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// This must always be zero.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;&nbsp;flags;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// More flags. See documentation.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;base_hi;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The upper 16 bits of the address to jump to.</span><br/>
+}&nbsp;<span class='code_function'>__attribute__</span>((packed));<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;idt_entry_struct&nbsp;<span class='code_typedef'>idt_entry_t</span>;<br/>
+<br/>
+<span class='code_comment'>// A struct describing a pointer to an array of interrupt handlers.</span><br/>
+<span class='code_comment'>// This is in a format suitable for giving to 'lidt'.</span><br/>
+<span class='code_primitive'>struct</span>&nbsp;idt_ptr_struct<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;limit;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;base;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The address of the first element in our idt_entry_t array.</span><br/>
+}&nbsp;<span class='code_function'>__attribute__</span>((packed));<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;idt_ptr_struct&nbsp;<span class='code_typedef'>idt_ptr_t</span>;<br/>
+<br/>
+<span class='code_comment'>// These extern directives let us access the addresses of our ASM ISR handlers.</span><br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;isr0&nbsp;();<br/>
+...<br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>isr31</span>();
+</div>
+</p>
+<p><div class='image_frame'><img src='images/gdt_idt_idt_format_1.png' /><br/><span class='image_caption'>Flags byte format</span></div> See? Very similar to the GDT entry and ptr structs. The flags field
+format is shown on the right. The lower 5-bits should be constant at
+0b0110 - 14 in decimal. The DPL describes the privilege level we
+expect to be called from - in our case zero, but as we progress we'll
+have to change that to 3. The P bit signifies the entry is
+present. Any descriptor with this bit clear will cause a "Interrupt
+Not Handled" exception.
+</p>
+<p></p><h3>4.4.2. descriptor_tables.c</h3>
+<p>We need to modify this file to add our new code.
+</p>
+<p><div class='code'>
+...<br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>idt_flush</span>(<span class='code_primitive'>u32int</span>);<br/>
+...<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_idt</span>();<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>idt_set_gate</span>(<span class='code_primitive'>u8int</span>,<span class='code_primitive'>u32int</span>,<span class='code_primitive'>u16int</span>,<span class='code_primitive'>u8int</span>);<br/>
+...<br/>
+<span class='code_typedef'>idt_entry_t</span>&nbsp;idt_entries[<span class='code_integer'>256</span>];<br/>
+<span class='code_typedef'>idt_ptr_t</span>&nbsp;&nbsp;&nbsp;idt_ptr;<br/>
+...<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_descriptor_tables</span>()<br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_function'>init_gdt</span>();<br/>
+&nbsp;&nbsp;<span class='code_function'>init_idt</span>();<br/>
+}<br/>
+...<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_idt</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;idt_ptr.limit&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>idt_entry_t</span>)&nbsp;<span class='code_operator'>*</span>&nbsp;<span class='code_integer'>256</span>&nbsp;<span class='code_operator'>-</span><span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;idt_ptr.base&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)<span class='code_operator'>&</span>idt_entries;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(<span class='code_operator'>&</span>idt_entries,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>idt_entry_t</span>)<span class='code_operator'>*</span><span class='code_integer'>256</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>idt_set_gate</span>(&nbsp;<span class='code_integer'>0</span>,&nbsp;(<span class='code_primitive'>u32int</span>)isr0&nbsp;,&nbsp;<span class='code_integer'>0</span>x08,&nbsp;<span class='code_integer'>0</span>x8E);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>idt_set_gate</span>(&nbsp;<span class='code_integer'>1</span>,&nbsp;(<span class='code_primitive'>u32int</span>)isr1&nbsp;,&nbsp;<span class='code_integer'>0</span>x08,&nbsp;<span class='code_integer'>0</span>x8E);<br/>
+&nbsp;&nbsp;&nbsp;...<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>idt_set_gate</span>(<span class='code_integer'>31</span>,&nbsp;(<span class='code_primitive'>u32int</span>)isr32,&nbsp;<span class='code_integer'>0</span>x08,&nbsp;<span class='code_integer'>0</span>x8E);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>idt_flush</span>((<span class='code_primitive'>u32int</span>)<span class='code_operator'>&</span>idt_ptr);<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>idt_set_gate</span>(<span class='code_primitive'>u8int</span>&nbsp;num,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;base,&nbsp;<span class='code_primitive'>u16int</span>&nbsp;sel,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;flags)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;idt_entries[num].base_lo&nbsp;<span class='code_operator'>=</span>&nbsp;base&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFFFF;<br/>
+&nbsp;&nbsp;&nbsp;idt_entries[num].base_hi&nbsp;<span class='code_operator'>=</span>&nbsp;(base&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>&gt;</span>&nbsp;<span class='code_integer'>16</span>)&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFFFF;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;idt_entries[num].sel&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;sel;<br/>
+&nbsp;&nbsp;&nbsp;idt_entries[num].always0&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We must uncomment the OR below when we get to using user-mode.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// It sets the interrupt gate's privilege level to 3.</span><br/>
+&nbsp;&nbsp;&nbsp;idt_entries[num].flags&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;flags&nbsp;<span class='code_comment'>/*&nbsp;|&nbsp;0x60&nbsp;*/</span>;<br/>
+}
+</div>
+</p>
+<p>This gets added to gdt.s also:
+</p>
+<p><div class='code'>
+[<span class='code_primitive'>GLOBAL</span>&nbsp;idt_flush]&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Allows the C code to call idt_flush().</span><br/>
+<br/>
+<span class='code_label'>idt_flush:</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;eax,&nbsp;[esp+4]&nbsp;&nbsp;<span class='code_comment'>; Get the pointer to the IDT, passed as a parameter. </span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>lidt</span>&nbsp;[eax]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Load the IDT pointer.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>ret</span>
+</div>
+</p>
+<p></p><h3>4.4.3. interrupt.s</h3>
+<p>Great! We've got code that will tell the CPU where to find our
+interrupt handlers - but we haven't written any yet!
+</p>
+<p>When the processor receives an interrupt, it saves the contents of the
+essential registers (instruction pointer, stack pointer, code and data
+segments, flags register) to the stack. It then finds the interrupt
+handler location from our IDT and jumps to it.
+</p>
+<p>Now, just like POSIX signal handlers, you don't get given any information
+about what interrupt was called when your handler is run. So,
+unfortunately, we can't just have one common handler, we must write a
+different handler for each interrupt we want to handle. This is pretty
+crap, so we want to keep the amount of duplicated code to a
+minimum. We do this by writing many handlers that just push the
+interrupt number (hardcoded in the ASM) onto the stack, and call a
+common handler function.
+</p>
+<p>That's all gravy, but unfortunately, we have another problem - some
+interrupts also push an error code onto the stack. We can't call a
+common function without a common stack frame, so for those that don't
+push an error code, we push a dummy one, so the stack is the same.
+</p>
+<p><div class='code'>
+[<span class='code_primitive'>GLOBAL</span>&nbsp;isr0]<br/>
+<span class='code_label'>isr0:</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>cli</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Disable interrupts</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;byte&nbsp;0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Push a dummy error code (if ISR0 doesn't push it's own error code)</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;byte&nbsp;0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Push the interrupt number (0)</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>jmp</span>&nbsp;isr_common_stub&nbsp;<span class='code_comment'>; Go to our common handler.</span>
+</div>
+</p>
+<p>That sample routine will work, but 32 versions of that still sounds
+like a lot of code. We can use NASM's macro facility to cut this down,
+though:
+</p>
+<p><div class='code'>
+<span class='code_preprocessor'>%<span class='code_preprocessor_cmd'>macro</span></span>&nbsp;ISR_NOERRCODE&nbsp;1&nbsp;&nbsp;<span class='code_comment'>; define a macro, taking one parameter</span><br/>
+&nbsp;&nbsp;[<span class='code_primitive'>GLOBAL</span>&nbsp;isr%1]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; %1 accesses the first parameter.</span><br/>
+&nbsp;&nbsp;<span class='code_label'>isr%1:</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>cli</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;byte&nbsp;0<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;byte&nbsp;%1<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>jmp</span>&nbsp;isr_common_stub<br/>
+<span class='code_preprocessor'>%<span class='code_preprocessor_cmd'>endmacro</span></span><br/>
+<br/>
+<span class='code_preprocessor'>%<span class='code_preprocessor_cmd'>macro</span></span>&nbsp;ISR_ERRCODE&nbsp;1<br/>
+&nbsp;&nbsp;[<span class='code_primitive'>GLOBAL</span>&nbsp;isr%1]<br/>
+&nbsp;&nbsp;<span class='code_label'>isr%1:</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>cli</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;byte&nbsp;%1<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>jmp</span>&nbsp;isr_common_stub<br/>
+<span class='code_preprocessor'>%<span class='code_preprocessor_cmd'>endmacro</span></span>
+</div>
+</p>
+<p>We can now make a stub handler function just by doing
+</p>
+<p><div class='code'>
+ISR_NOERRCODE&nbsp;0<br/>
+ISR_NOERRCODE&nbsp;1<br/>
+...
+</div>
+</p>
+<p>Much less work, and anything that makes our lives easier is worth
+doing. A quick look at the intel manual will tell you that only
+interrupts 8, 10-14 inclusive push error codes onto the stack. The
+rest require dummy error codes.
+</p>
+<p><i>We're almost there, I promise!</i>
+</p>
+<p>Only 2 more things left to do - one is to create an ASM common handler
+function. The other is to create a higher-level C handler function.
+</p>
+<p><div class='code'>
+<span class='code_comment'>; In isr.c</span><br/>
+[<span class='code_primitive'>EXTERN</span>&nbsp;isr_handler]<br/>
+<br/>
+<span class='code_comment'>; This is our common ISR stub. It saves the processor state, sets</span><br/>
+<span class='code_comment'>; up for kernel mode segments, calls the C-level fault handler,</span><br/>
+<span class='code_comment'>; and finally restores the stack frame.</span><br/>
+<span class='code_label'>isr_common_stub:</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>pusha</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Pushes edi,esi,ebp,esp,ebx,edx,ecx,eax</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ax,&nbsp;ds&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Lower 16-bits of eax = ds.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;eax&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; save the data segment descriptor</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ax,&nbsp;0x10&nbsp;&nbsp;<span class='code_comment'>; load the kernel data segment descriptor</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ds,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;es,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;fs,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;gs,&nbsp;ax<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>call</span>&nbsp;isr_handler<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>pop</span>&nbsp;eax&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; reload the original data segment descriptor</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ds,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;es,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;fs,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;gs,&nbsp;ax<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>popa</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Pops edi,esi,ebp...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>add</span>&nbsp;esp,&nbsp;8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Cleans up the pushed error code and pushed ISR number</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>sti</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>iret</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; pops 5 things at once: CS, EIP, EFLAGS, SS, and ESP</span>
+</div>
+</p>
+<p>This piece of code is our common interrupt handler. It firstly uses
+the 'pusha' command to push all the general purpose registers on the
+stack. It uses the 'popa' command to restore them at the end. It also
+gets the current data segment selector and pushes that onto the
+stack, sets all the segment registers to the kernel data
+selector, and restores them afterwards. This won't actually have an
+effect at the moment, but it will when we switch to user-mode. Notice
+it also calls a higher-level interrupt handler - <i>isr_handler</i>.
+</p>
+<p>When an interrupt fires, the processor automatically pushes
+information about the processor state onto the stack. The code
+segment, instruction pointer, flags register, stack segment and stack
+pointer are pushed. The IRET instruction is specifically designed to
+return from an interrupt. It pops these values off the stack and
+returns the processor to the state it was in originally.
+</p>
+<p></p><h3>4.4.4. isr.c</h3>
+<p><div class='code'>
+<span class='code_comment'>//</span><br/>
+<span class='code_comment'>// isr.c -- High level interrupt service routines and interrupt request handlers.</span><br/>
+<span class='code_comment'>//          Part of this code is modified from Bran's kernel development tutorials.</span><br/>
+<span class='code_comment'>//          Rewritten for JamesM's kernel development tutorials.</span><br/>
+<span class='code_comment'>//</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"isr.h"<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"monitor.h"<br/>
+</span><br/>
+<span class='code_comment'>// This gets called from our ASM interrupt handler stub.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>isr_handler</span>(<span class='code_typedef'>registers_t</span>&nbsp;regs)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"recieved&nbsp;interrupt:&nbsp;"</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write_dec</span>(regs.int_no);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_put</span>(<span class='code_character'>'\n'</span>);<br/>
+}
+</div>
+</p>
+<p>Nothing much to explain here - The interrupt handler prints a message
+out to the screen, along with the interrupt number it handled. It uses
+a structure registers_t, which is a representation of all the
+registers we pushed, and is defined in isr.h:
+</p>
+<p></p><h3>4.4.5. isr.h</h3>
+<p><div class='code'>
+<span class='code_comment'>//</span><br/>
+<span class='code_comment'>// isr.h -- Interface and structures for high level interrupt service routines.</span><br/>
+<span class='code_comment'>//          Part of this code is modified from Bran's kernel development tutorials.</span><br/>
+<span class='code_comment'>//          Rewritten for JamesM's kernel development tutorials.</span><br/>
+<span class='code_comment'>//</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;registers<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ds;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Data segment selector</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;edi,&nbsp;esi,&nbsp;ebp,&nbsp;esp,&nbsp;ebx,&nbsp;edx,&nbsp;ecx,&nbsp;eax;&nbsp;<span class='code_comment'>// Pushed by pusha.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;int_no,&nbsp;err_code;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Interrupt number and error code (if applicable)</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;eip,&nbsp;cs,&nbsp;eflags,&nbsp;useresp,&nbsp;ss;&nbsp;<span class='code_comment'>// Pushed by the processor automatically.</span><br/>
+}&nbsp;<span class='code_typedef'>registers_t</span>;
+</div>
+</p>
+<p></p><h3>4.4.6. Testing it out</h3>
+<p>Wow, that was a seriously long chapter! Don't get put off, they're not
+all this length. We just have to do an awful lot here to get anything
+out of it.
+</p>
+<p>Now we can test it out! Add this to your main() function:
+</p>
+<p><div class='code'>
+asm&nbsp;volatile&nbsp;(<span class='code_string'>"int&nbsp;$0x3"</span>);<br/>
+asm&nbsp;volatile&nbsp;(<span class='code_string'>"int&nbsp;$0x4"</span>);
+</div>
+</p>
+<p><div class='image_frame'><img src='images/gdt_idt_bochs.png' /><br/><span class='image_caption'>What it should look like</span></div>This causes two software interrupts: 3 and 4. You should see the
+messages printed out just like the screenshot on the right.
+</p>
+<p>Congrats! You've now got a kernel that can handle interrupts, and set
+up its own segmentation tables (a pretty hollow victory, considering
+all that code and theory, but unfortunately there's no getting around it!).
+</p>
+<p>The sample code for this tutorial can be found <a href='/downloads/gdt_idt.tar.gz'>here</a>.
+</p></div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+</body></html>

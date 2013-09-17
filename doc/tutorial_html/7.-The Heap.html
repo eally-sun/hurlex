@@ -1,0 +1,814 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><title>7.-The Heap</title><link rel='stylesheet' type='text/css' href='css/highlight.css'><link rel='stylesheet' type='text/css' href='css/layout.css'></head><body><div class="header">
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="index.html">Home</a> &raquo;
+	 	JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+
+<div class='index'>
+<a href='1.-Environment setup.html'>1. Environment setup</a><br/><a href='2.-Genesis.html'>2. Genesis</a><br/><a href='3.-The Screen.html'>3. The Screen</a><br/><a href='4.-The GDT and IDT.html'>4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html'>5. IRQs and the PIT</a><br/><a href='6.-Paging.html'>6. Paging</a><br/><a href='7.-The Heap.html' class='selected' >7. The Heap</a><br/><a href='8.-The VFS and the initrd.html'>8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html'>9. Multitasking</a><br/><a href='10.-User Mode.html'>10. User Mode</a><br/></div>
+<h1>7. The Heap</h1>
+<p>In order to be responsive to situations that you didn't envisage at
+the design stage, and to cut down the size of your kernel, you will need some kind of dynamic memory allocation. The current memory allocation system (allocation by placement address) is absolutely fine, and is in fact optimal for both time and space for allocations. The problem occurs when you try to free some memory, and want to reclaim it (this must happen eventually, otherwise you will run out!). The placement mechanism has absolutely no way to do this, and is thus not viable for the majority of kernel allocations.
+</p>
+<p>As a sidepoint of general terminology, <i>any</i> data structure that provides both allocation and deallocation of contiguous memory can be referred to as a heap (or a pool). There is, as such, no standard 'heap algorithm' - Different algorithms are used depending on time/space/efficiency requirements. <i>Our</i> requirements are:
+</p>
+<p><ul>
+<li>(Relatively) simple to implement.</li>
+<li>Able to check consistency - debugging memory overwrites in a kernel is about ten times more difficult than in normal apps!</li>
+</ul>
+</p>
+<p>The algorithm and data structures presented here are ones which I developed myself. They are so simple however, that I am sure others will have used it first. It is similar to (though more simple than) <a href='http://g.oswego.edu/dl/html/malloc.html'>Doug Lea's malloc</a> which is used in the GNU C library.
+</p>
+<p></p><h2>7.1. Data structure description</h2>
+<p><div class='image_frame'><img src='images/heap_format.png' /><br/><span class='image_caption'>The index table with pointers to holes</span></div>The algorithm uses two concepts: <i>blocks</i> and <i>holes</i>. Blocks are contiguous areas of memory containing user data currently in use (i.e. malloc()d but not free()d). Holes are blocks but their contents are <i>not</i> in use. So initially by this concept the entire area of heap space is one large hole.
+</p>
+<p>For every hole there is a corresponding descriptor in an index table. The index table is always ordered ascending by the size of the hole pointed to.
+</p>
+<p>Blocks and holes each contain descriptive data - a header and a footer. The header contains the most information about the block - the footer merely contains a pointer to the header (the reason for the footer will become apparent soon). Pseudocode:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span><br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;magic;&nbsp;&nbsp;<span class='code_comment'>// Magic number, used for error checking and identification.</span><br/>
+&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;is_hole;&nbsp;<span class='code_comment'>// 1 if this is a hole, 0 if this is a block.</span><br/>
+&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;size;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Size of the block, including this and the footer.</span><br/>
+}&nbsp;<span class='code_typedef'>header_t</span>;<br/>
+<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span><br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;magic;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Magic number, same as in header_t.</span><br/>
+&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>header;&nbsp;<span class='code_comment'>// Pointer to the block header.</span><br/>
+}&nbsp;<span class='code_typedef'>footer_t</span>;
+</div>
+</p>
+<p>Notice that each also has a 'magic number' field. This is for error checking, and later will play a part in our 'free' algorithm. This is just a sentinel number - an unusual number that will stand out from others - much like 0xdeadbaba that we used in chapter 2. In the sample code I've gone for 0x123890AB arbitrarily.
+</p>
+<p>Note also that within this tutorial I will refer to the <i>size</i> of a block being the number of bytes from the start of the header to the end of the footer - so within a block of size <i>x</i>, there will be x - sizeof(header_t) - sizeof(footer_t) user-useable bytes.
+</p>
+<p></p><h2>7.2. Algorithm description</h2>
+<p></p><h3>7.2.1. Allocation</h3>
+<p>Allocation is straightforward, if a little long-winded. Most of the steps are error-checking and creating new holes to minimise memory leaks.
+</p>
+<p><ol>
+<li>Search the index table to find the smallest hole that will fit the requested size. As the table is ordered, this just entails iterating through until we find a hole which will fit.</li>
+<ul>
+<li>If we didn't find a hole large enough, then:</li>
+<ol>
+<li>Expand the heap.</li>
+<li>If the index table is empty (no holes have been recorded) then add a new entry to it.</li>
+<li>Else, adjust the last header's size member and rewrite the footer.</li>
+<li>To ease the number of control-flow statements, we can just recurse and call the allocation function again, trusting that this time there will be a hole large enough.</li>
+</ol>
+</ul>
+<li>Decide if the hole should be split into two parts. This will normally be the case - we usually will want much less space than is available in the hole. The only time this will not happen is if there is less free space after allocating the block than the header/footer takes up. In this case we can just increase the block size and reclaim it all afterwards.</li>
+<li>If the block should be page-aligned, we must alter the block starting address so that it is and create a new hole in the new unused area.</li>
+<ul>
+<li>If it is not, we can just delete the hole from the index.</li>
+</ul>
+<li>Write the new block's header and footer.</li>
+<li>If the hole was to be split into two parts, do it now and write a new hole into the index.</li>
+<li>Return the address of the block + sizeof(header_t) to the user.</li>
+</ol>
+</p>
+<p></p><h3>7.2.2. Deallocation</h3>
+<p>Deallocation (freeing) is a little more tricky. As mentioned earlier, this is where the efficiency of a memory-management algorithm is really tested. The problem is effective reclaimation of memory. The naive solution would be to change the given block to a hole and enter it back into the hole index. However, if I do this:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>int</span>&nbsp;a&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_integer'>8</span>);&nbsp;<span class='code_comment'>// Allocate 8 bytes: returns 0xC0080000 for sake of argument</span><br/>
+<span class='code_primitive'>int</span>&nbsp;b&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_integer'>8</span>);&nbsp;<span class='code_comment'>// Allocate another 8 bytes: returns 0xC0080008.</span><br/>
+<span class='code_function'>kfree</span>(a);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Release a</span><br/>
+<span class='code_function'>kfree</span>(b);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Release b</span><br/>
+<span class='code_primitive'>int</span>&nbsp;c&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_integer'>16</span>);<span class='code_comment'>// What will this allocation return?</span>
+</div>
+</p>
+<p><i>Note that in this example the space required for headers and footers have been purposely omitted for readability</i>
+</p>
+<p>Here we have allocated space for 8 bytes, twice. We then release both of those allocations. With the naive release algorithm we would then end up with two 8-byte sized holes in the index. When the next allocation (for 16 bytes) comes along, neither of those holes can fit it, so the kmalloc() call will return 0xC0080010. This is suboptimal. There are 16 bytes of space free at 0xC0080000, so we <i>should</i> be reallocating that!
+</p>
+<p><div class='image_frame'><img src='images/unifying.png' /><br/><span class='image_caption'>Unifying the two allocations in the top diagram into one in the lower diagram.</span></div>The solution to this problem in most cases is a varation on a simple algorithm that I call <i>unification</i> - That is, converting two adjacent holes into one. (Please note that this coining of a term is not from a sense of self-importance, merely from the absence of a standardised name).
+</p>
+<p>It works thus: When free()ing a block, look at what is immediately to the left (assuming 0-4GB left-to-right) of the header. If that is a footer, which can be discovered from the value of the magic number, then follow the pointer to it's header and query whether it is a hole or a block. If it is a hole, we can modify it's header's size attribute to take into account both it's size and ours, then point <i>our</i> footer to <i>it's</i> header. We have thus amalgamated both holes into one (and in this case there is no need to do an expensive <i>insert</i> operation on the index).
+</p>
+<p>That is what I call <i>unifying left</i>. There is also <i>unifying right</i>, which should be performed on free() as well. Here we look at what is directly after the footer. If we find a header there, again identified by it's magic number, we check if it is a hole. We can then use it's size attribute to find it's footer. We rewrite the footer's pointer to point to <i>our</i> header. Then, all that needs to be done is to remove it's old entry from the hole index, and add our own.
+</p>
+<p>Note also that in the name of reclaiming space, if we are free()ing the last block in the heap (there are no holes or blocks after us), then we can contract the size of the heap. To avoid this happening constantly, in my implementation I have defined a minimum heap size, below which it will not contract.
+</p>
+<p></p><h4>7.2.2.1. Pseudocode</h4>
+<p><ol>
+<li>Find the header by taking the given pointer and subtracting the sizeof(header_t).</li>
+<li>Sanity checks. Assert that the header and footer's magic numbers remain in tact.</li>
+<li>Set the is_hole flag in our header to 1.</li>
+<li>If the thing immediately to our left is a footer:</li>
+<ul>
+<li>Unify left. In this case, at the end of the algorithm we shouldn't add our header to the hole index (the header we are unifying with is already there!) so set a flag which the algorithm checks later.</li>
+</ul>
+<li>If the thing immediately to our right is a header:</li>
+<ul>
+<li>Unify right.</li>
+</ul>
+<li>If the footer is the last in the heap ( footer_location+sizeof(footer_t) == end_address ):</li>
+<ul>
+<li>Contract.</li>
+</ul>
+<li>Insert the header into the hole array unless the flag described in <i>Unify left</i> is set.</li>
+</ol>
+</p>
+<p></p><h2>7.3. Implementing an ordered list</h2>
+<p>So now we come to the implementation. As usual I'm going to try and explain the utility datatypes and functions first, and finish up with the allocation/free functions themselves.
+</p>
+<p>The first datatype we need it an implementation of an ordered list. This concept will be used multiple times in your kernel (it is a common requirement) so it is probably a good idea to abstract it, so it can be used again.
+</p>
+<p></p><h3>7.3.1. ordered_array.h</h3>
+<p><div class='code'>
+<span class='code_comment'>// ordered_array.h -- Interface for creating, inserting and deleting</span><br/>
+<span class='code_comment'>//                    from ordered arrays.</span><br/>
+<span class='code_comment'>//                    Written for JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>ifndef</span>&nbsp;ORDERED_ARRAY_H<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;ORDERED_ARRAY_H<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;This&nbsp;array&nbsp;is&nbsp;insertion&nbsp;sorted&nbsp;-&nbsp;it&nbsp;always&nbsp;remains&nbsp;in&nbsp;a&nbsp;sorted&nbsp;state&nbsp;(between&nbsp;calls).<br />
+&nbsp;&nbsp;It&nbsp;can&nbsp;store&nbsp;anything&nbsp;that&nbsp;can&nbsp;be&nbsp;cast&nbsp;to&nbsp;a&nbsp;void*&nbsp;--&nbsp;so&nbsp;a&nbsp;u32int,&nbsp;or&nbsp;any&nbsp;pointer.<br />
+**/</span><br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>void</span><span class='code_operator'>*</span>&nbsp;<span class='code_typedef'>type_t</span>;<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;A&nbsp;predicate&nbsp;should&nbsp;return&nbsp;nonzero&nbsp;if&nbsp;the&nbsp;first&nbsp;argument&nbsp;is&nbsp;less&nbsp;than&nbsp;the&nbsp;second.&nbsp;Else<br />
+&nbsp;&nbsp;it&nbsp;should&nbsp;return&nbsp;zero.<br />
+**/</span><br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>s8int</span>&nbsp;(<span class='code_operator'>*</span><span class='code_typedef'>lessthan_predicate_t</span>)(<span class='code_typedef'>type_t</span>,<span class='code_typedef'>type_t</span>);<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span><br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>type_t</span>&nbsp;<span class='code_operator'>*</span>array;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;size;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;max_size;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>lessthan_predicate_t</span>&nbsp;less_than;<br/>
+}&nbsp;<span class='code_typedef'>ordered_array_t</span>;<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;A&nbsp;standard&nbsp;less&nbsp;than&nbsp;predicate.<br />
+**/</span><br/>
+<span class='code_primitive'>s8int</span>&nbsp;<span class='code_function'>standard_lessthan_predicate</span>(<span class='code_typedef'>type_t</span>&nbsp;a,&nbsp;<span class='code_typedef'>type_t</span>&nbsp;b);<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Create&nbsp;an&nbsp;ordered&nbsp;array.<br />
+**/</span><br/>
+<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_function'>create_ordered_array</span>(<span class='code_primitive'>u32int</span>&nbsp;max_size,&nbsp;<span class='code_typedef'>lessthan_predicate_t</span>&nbsp;less_than);<br/>
+<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_function'>place_ordered_array</span>(<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span>addr,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;max_size,&nbsp;<span class='code_typedef'>lessthan_predicate_t</span>&nbsp;less_than);<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Destroy&nbsp;an&nbsp;ordered&nbsp;array.<br />
+**/</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>destroy_ordered_array</span>(<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_operator'>*</span>array);<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Add&nbsp;an&nbsp;item&nbsp;into&nbsp;the&nbsp;array.<br />
+**/</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>insert_ordered_array</span>(<span class='code_typedef'>type_t</span>&nbsp;item,&nbsp;<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_operator'>*</span>array);<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Lookup&nbsp;the&nbsp;item&nbsp;at&nbsp;index&nbsp;i.<br />
+**/</span><br/>
+<span class='code_typedef'>type_t</span>&nbsp;<span class='code_function'>lookup_ordered_array</span>(<span class='code_primitive'>u32int</span>&nbsp;i,&nbsp;<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_operator'>*</span>array);<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Deletes&nbsp;the&nbsp;item&nbsp;at&nbsp;location&nbsp;i&nbsp;from&nbsp;the&nbsp;array.<br />
+**/</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>remove_ordered_array</span>(<span class='code_primitive'>u32int</span>&nbsp;i,&nbsp;<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_operator'>*</span>array);<br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>endif</span>&nbsp;//&nbsp;ORDERED_ARRAY_H<br/>
+</span>
+</div>
+</p>
+<p>Notice that in the name of abstraction we have made the 'less than' function user-defineable. We will use this in the heap implementation to order by size and not pointer address. Note also we have two methods of defining an ordered_array. <i>create_ordered_array</i> will use kmalloc() to get some space. <i>place_ordered_array</i> will use the given start location. As we want to put our heap in a specific place (and because kmalloc isn't yet working!) we use place_ordered_array in our heap code.
+</p>
+<p></p><h3>7.3.2. ordered_map.c</h3>
+<p><div class='code'>
+<span class='code_comment'>// ordered_array.c -- Implementation for creating, inserting and deleting</span><br/>
+<span class='code_comment'>//                    from ordered arrays.</span><br/>
+<span class='code_comment'>//                    Written for JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"ordered_array.h"<br/>
+</span><br/>
+<span class='code_primitive'>s8int</span>&nbsp;<span class='code_function'>standard_lessthan_predicate</span>(<span class='code_typedef'>type_t</span>&nbsp;a,&nbsp;<span class='code_typedef'>type_t</span>&nbsp;b)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;(a<span class='code_operator'>&lt;</span>b)?<span class='code_integer'>1</span>:<span class='code_integer'>0</span>;<br/>
+}<br/>
+<br/>
+<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_function'>create_ordered_array</span>(<span class='code_primitive'>u32int</span>&nbsp;max_size,&nbsp;<span class='code_typedef'>lessthan_predicate_t</span>&nbsp;less_than)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>ordered_array_t</span>&nbsp;to_ret;<br/>
+&nbsp;&nbsp;&nbsp;to_ret.array&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>void</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc</span>(max_size<span class='code_operator'>*</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>type_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(to_ret.array,&nbsp;<span class='code_integer'>0</span>,&nbsp;max_size<span class='code_operator'>*</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>type_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;to_ret.size&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;to_ret.max_size&nbsp;<span class='code_operator'>=</span>&nbsp;max_size;<br/>
+&nbsp;&nbsp;&nbsp;to_ret.less_than&nbsp;<span class='code_operator'>=</span>&nbsp;less_than;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;to_ret;<br/>
+}<br/>
+<br/>
+<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_function'>place_ordered_array</span>(<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span>addr,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;max_size,&nbsp;<span class='code_typedef'>lessthan_predicate_t</span>&nbsp;less_than)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>ordered_array_t</span>&nbsp;to_ret;<br/>
+&nbsp;&nbsp;&nbsp;to_ret.array&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>type_t</span><span class='code_operator'>*</span>)addr;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(to_ret.array,&nbsp;<span class='code_integer'>0</span>,&nbsp;max_size<span class='code_operator'>*</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>type_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;to_ret.size&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;to_ret.max_size&nbsp;<span class='code_operator'>=</span>&nbsp;max_size;<br/>
+&nbsp;&nbsp;&nbsp;to_ret.less_than&nbsp;<span class='code_operator'>=</span>&nbsp;less_than;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;to_ret;<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>destroy_ordered_array</span>(<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_operator'>*</span>array)<br/>
+{<br/>
+<span class='code_comment'>//    kfree(array->array);</span><br/>
+}<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>insert_ordered_array</span>(<span class='code_typedef'>type_t</span>&nbsp;item,&nbsp;<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_operator'>*</span>array)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>less_than);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;iterator&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(iterator&nbsp;<span class='code_operator'>&lt;</span>&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span>&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span><span class='code_function'>less_than</span>(array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>array[iterator],&nbsp;item))<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;iterator<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(iterator&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size)&nbsp;<span class='code_comment'>// just add at the end of the array.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>array[array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size<span class='code_operator'>++</span>]&nbsp;<span class='code_operator'>=</span>&nbsp;item;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>type_t</span>&nbsp;tmp&nbsp;<span class='code_operator'>=</span>&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>array[iterator];<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>array[iterator]&nbsp;<span class='code_operator'>=</span>&nbsp;item;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(iterator&nbsp;<span class='code_operator'>&lt;</span>&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;iterator<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>type_t</span>&nbsp;tmp2&nbsp;<span class='code_operator'>=</span>&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>array[iterator];<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>array[iterator]&nbsp;<span class='code_operator'>=</span>&nbsp;tmp;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tmp&nbsp;<span class='code_operator'>=</span>&nbsp;tmp2;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+}<br/>
+<br/>
+<span class='code_typedef'>type_t</span>&nbsp;<span class='code_function'>lookup_ordered_array</span>(<span class='code_primitive'>u32int</span>&nbsp;i,&nbsp;<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_operator'>*</span>array)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>array[i];<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>remove_ordered_array</span>(<span class='code_primitive'>u32int</span>&nbsp;i,&nbsp;<span class='code_typedef'>ordered_array_t</span>&nbsp;<span class='code_operator'>*</span>array)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>array[i]&nbsp;<span class='code_operator'>=</span>&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>array[i<span class='code_operator'>+</span><span class='code_integer'>1</span>];<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;array<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size<span class='code_operator'>--</span>;<br/>
+}
+</div>
+</p>
+<p>Hopefully nothing there should surprise you. On <i>insert</i> the item is placed at the correct position and all larger other items shifted up one position. As always with these satellite datatypes, any implementation will work. There <b>are</b> better implementations of ordered arrays than this (c.f. heap-ordering, binary search trees), but I decided to go with a simple one for teaching purposes.
+</p>
+<p></p><h2>7.4. The heap itself</h2>
+<p></p><h3>7.4.1. kheap.h</h3>
+<p>Some #defines and function prototypes are useful:
+<div class='code'>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;KHEAP_START&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0xC0000000<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;KHEAP_INITIAL_SIZE&nbsp;&nbsp;0x100000<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;HEAP_INDEX_SIZE&nbsp;&nbsp;&nbsp;0x20000<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;HEAP_MAGIC&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0x123890AB<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;HEAP_MIN_SIZE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0x70000<br/>
+</span><br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Size&nbsp;information&nbsp;for&nbsp;a&nbsp;hole/block<br />
+**/</span><br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span><br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;magic;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Magic number, used for error checking and identification.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;is_hole;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// 1 if this is a hole. 0 if this is a block.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;size;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// size of the block, including the end footer.</span><br/>
+}&nbsp;<span class='code_typedef'>header_t</span>;<br/>
+<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span><br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;magic;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Magic number, same as in header_t.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>header;&nbsp;<span class='code_comment'>// Pointer to the block header.</span><br/>
+}&nbsp;<span class='code_typedef'>footer_t</span>;<br/>
+<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span><br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>ordered_array_t</span>&nbsp;index;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;start_address;&nbsp;<span class='code_comment'>// The start of our allocated space.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;end_address;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The end of our allocated space. May be expanded up to max_address.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;max_address;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The maximum address the heap can be expanded to.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;supervisor;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Should extra pages requested by us be mapped as supervisor-only?</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;readonly;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Should extra pages requested by us be mapped as read-only?</span><br/>
+}&nbsp;<span class='code_typedef'>heap_t</span>;<br/>
+<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Create&nbsp;a&nbsp;new&nbsp;heap.<br />
+**/</span><br/>
+<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>create_heap</span>(<span class='code_primitive'>u32int</span>&nbsp;start,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;end,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;max,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;supervisor,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;readonly);<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Allocates&nbsp;a&nbsp;contiguous&nbsp;region&nbsp;of&nbsp;memory&nbsp;'size'&nbsp;in&nbsp;size.&nbsp;If&nbsp;page_align==1,&nbsp;it&nbsp;creates&nbsp;that&nbsp;block&nbsp;starting<br />
+&nbsp;&nbsp;on&nbsp;a&nbsp;page&nbsp;boundary.<br />
+**/</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>alloc</span>(<span class='code_primitive'>u32int</span>&nbsp;size,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;page_align,&nbsp;<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span>heap);<br/>
+<span class='code_comment'>/**<br />
+&nbsp;&nbsp;Releases&nbsp;a&nbsp;block&nbsp;allocated&nbsp;with&nbsp;'alloc'.<br />
+**/</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>free</span>(<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span>p,&nbsp;<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span>heap);
+</div>
+</p>
+<p>I have decided, arbitrarily, to put the kernel heap at 0xC0000000, give it's index a size of 0x20000 bytes, and give it a minimum size of 0x70000 bytes. The header and footer structures are the same as those given at the top of the chapter. We can actually have more than one heap (in my own kernel I have a user-mode heap as well), so for ease of portability I have decided to implement the heap as a datatype itself. heap_t keeps track of the heap's index, start/end/max addresses and the modifiers to give alloc_page when requesting more memory.
+</p>
+<p></p><h3>7.4.2. kheap.c</h3>
+<p>Finding the smallest hole that will fit a certain number of bytes is a common task that gets called on every allocation. It would therefore be nice to wrap this up in a function:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>s32int</span>&nbsp;<span class='code_function'>find_smallest_hole</span>(<span class='code_primitive'>u32int</span>&nbsp;size,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;page_align,&nbsp;<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span>heap)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Find the smallest hole that will fit.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;iterator&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(iterator&nbsp;<span class='code_operator'>&lt;</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index.size)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>header&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>)<span class='code_function'>lookup_ordered_array</span>(iterator,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If the user has requested the memory be page-aligned</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(page_align&nbsp;<span class='code_operator'>&gt;</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Page-align the starting point of this header.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;location&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)header;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>s32int</span>&nbsp;offset&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;((location<span class='code_operator'>+</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>))&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFFFFF000&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;offset&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000&nbsp;<span class='code_comment'>/*&nbsp;page&nbsp;size&nbsp;*/</span>&nbsp;&nbsp;<span class='code_operator'>-</span>&nbsp;(location<span class='code_operator'>+</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>))%<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>s32int</span>&nbsp;hole_size&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>s32int</span>)header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>-</span>&nbsp;offset;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Can we fit now?</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(hole_size&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>s32int</span>)size)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span>&nbsp;<span class='code_primitive'>if</span>&nbsp;(header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>=</span>&nbsp;size)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;iterator<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Why did the loop exit?</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(iterator&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index.size)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_operator'>-</span><span class='code_integer'>1</span>;&nbsp;<span class='code_comment'>// We got to the end and didn't find anything.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;iterator;<br/>
+}
+</div>
+</p>
+<p>I feel I should explain two lines:
+<div class='code'>
+<span class='code_primitive'>if</span>&nbsp;((location<span class='code_operator'>+</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>))&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFFFFF000&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;offset&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000&nbsp;<span class='code_comment'>/*&nbsp;page&nbsp;size&nbsp;*/</span>&nbsp;&nbsp;<span class='code_operator'>-</span>&nbsp;(location<span class='code_operator'>+</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>))%<span class='code_integer'>0</span>x1000;
+</div>
+</p>
+<p>It's important to note that when the user requests memory to be page-aligned, he is requesting the memory <i>that he has access to</i> to be page-aligned. That means that the header address will actually <i>not</i> be page-aligned. The address that we want to fall on a boundary is location + sizeof(header_t).
+</p>
+<p>Creating a heap is a simple procedure. The only part worthy of note is that we set aside the first HEAP_INDEX_SIZE*sizeof(type_t) bytes as the index. The index is put there using place_ordered_array, and the effective start address is shifted forwards. That is why, when testing your kernel, you will see allocations starting at 0xC0080000 instead of the more obvious 0xC0000000. Also note that we create a custom less_than function for the index array. This is because with the standard less_than function the array would be sorted by <i>pointer address</i>, instead of by size.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>s8int</span>&nbsp;<span class='code_function'>header_t_less_than</span>(<span class='code_primitive'>void</span><span class='code_operator'>*</span>a,&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span>b)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;(((<span class='code_typedef'>header_t</span><span class='code_operator'>*</span>)a)<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>&lt;</span>&nbsp;((<span class='code_typedef'>header_t</span><span class='code_operator'>*</span>)b)<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size)?<span class='code_integer'>1</span>:<span class='code_integer'>0</span>;<br/>
+}<br/>
+<br/>
+<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>create_heap</span>(<span class='code_primitive'>u32int</span>&nbsp;start,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;end_addr,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;max,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;supervisor,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;readonly)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span>heap&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>heap_t</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc</span>(<span class='code_function'>sizeof</span>(<span class='code_typedef'>heap_t</span>));<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// All our assumptions are made on startAddress and endAddress being page-aligned.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(start%<span class='code_integer'>0</span>x1000&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(end_addr%<span class='code_integer'>0</span>x1000&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the index.</span><br/>
+&nbsp;&nbsp;&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>place_ordered_array</span>(&nbsp;(<span class='code_primitive'>void</span><span class='code_operator'>*</span>)start,&nbsp;HEAP_INDEX_SIZE,&nbsp;<span class='code_operator'>&</span>header_t_less_than);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Shift the start address forward to resemble where we can start putting data.</span><br/>
+&nbsp;&nbsp;&nbsp;start&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>type_t</span>)<span class='code_operator'>*</span>HEAP_INDEX_SIZE;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Make sure the start address is page-aligned.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(start&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFFFFF000&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;start&nbsp;<span class='code_operator'>&=</span>&nbsp;<span class='code_integer'>0</span>xFFFFF000;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;start&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Write the start, end and max addresses into the heap structure.</span><br/>
+&nbsp;&nbsp;&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address&nbsp;<span class='code_operator'>=</span>&nbsp;start;<br/>
+&nbsp;&nbsp;&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address&nbsp;<span class='code_operator'>=</span>&nbsp;end_addr;<br/>
+&nbsp;&nbsp;&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>max_address&nbsp;<span class='code_operator'>=</span>&nbsp;max;<br/>
+&nbsp;&nbsp;&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>supervisor&nbsp;<span class='code_operator'>=</span>&nbsp;supervisor;<br/>
+&nbsp;&nbsp;&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>readonly&nbsp;<span class='code_operator'>=</span>&nbsp;readonly;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We start off with one large hole in the index.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>hole&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>)start;<br/>
+&nbsp;&nbsp;&nbsp;hole<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>=</span>&nbsp;end_addr<span class='code_operator'>-</span>start;<br/>
+&nbsp;&nbsp;&nbsp;hole<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;hole<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>is_hole&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>insert_ordered_array</span>((<span class='code_primitive'>void</span><span class='code_operator'>*</span>)hole,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;heap;<br/>
+}
+</div>
+</p>
+<p></p><h4>7.4.2.1. Expansion and contraction</h4>
+<p>At points we will need to alter the size of our heap. If we run out of space, we will need more. If we reclaim space, we may need less.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>expand</span>(<span class='code_primitive'>u32int</span>&nbsp;new_size,&nbsp;<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span>heap)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Sanity check.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(new_size&nbsp;<span class='code_operator'>&gt;</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address&nbsp;<span class='code_operator'>-</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Get the nearest following page boundary.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(new_size<span class='code_operator'>&</span><span class='code_integer'>0</span>xFFFFF000&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;new_size&nbsp;<span class='code_operator'>&=</span>&nbsp;<span class='code_integer'>0</span>xFFFFF000;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;new_size&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Make sure we are not overreaching ourselves.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address<span class='code_operator'>+</span>new_size&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>max_address);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// This should always be on a page boundary.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;old_size&nbsp;<span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address<span class='code_operator'>-</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;i&nbsp;<span class='code_operator'>=</span>&nbsp;old_size;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;new_size)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>alloc_frame</span>(&nbsp;<span class='code_function'>get_page</span>(heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address<span class='code_operator'>+</span>i,&nbsp;<span class='code_integer'>1</span>,&nbsp;kernel_directory),<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>supervisor)?<span class='code_integer'>1</span>:<span class='code_integer'>0</span>,&nbsp;(heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>readonly)?<span class='code_integer'>0</span>:<span class='code_integer'>1</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000&nbsp;<span class='code_comment'>/*&nbsp;page&nbsp;size&nbsp;*/</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address&nbsp;<span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address<span class='code_operator'>+</span>new_size;<br/>
+}
+</div>
+</p>
+<p>I think that code is self-explanatory. A few assertions are made, and the new_size parameter is changed so that it falls on a page boundary. Frames are then allocated one-by-one according to the parameters given when creating the heap (supervisor mode enabled?, read only access?).
+</p>
+<p><div class='code'>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>contract</span>(<span class='code_primitive'>u32int</span>&nbsp;new_size,&nbsp;<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span>heap)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Sanity check.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(new_size&nbsp;<span class='code_operator'>&lt;</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address<span class='code_operator'>-</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Get the nearest following page boundary.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(new_size<span class='code_operator'>&</span><span class='code_integer'>0</span>x1000)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;new_size&nbsp;<span class='code_operator'>&=</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;new_size&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Don't contract too far!</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(new_size&nbsp;<span class='code_operator'>&lt;</span>&nbsp;HEAP_MIN_SIZE)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;new_size&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MIN_SIZE;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;old_size&nbsp;<span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address<span class='code_operator'>-</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;i&nbsp;<span class='code_operator'>=</span>&nbsp;old_size&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(new_size&nbsp;<span class='code_operator'>&lt;</span>&nbsp;i)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>free_frame</span>(<span class='code_function'>get_page</span>(heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address<span class='code_operator'>+</span>i,&nbsp;<span class='code_integer'>0</span>,&nbsp;kernel_directory));<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i&nbsp;<span class='code_operator'>-</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address&nbsp;<span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address&nbsp;<span class='code_operator'>+</span>&nbsp;new_size;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;new_size;<br/>
+}
+</div>
+</p>
+<p>Similarly to expand, new_size is adjusted so it sits on a page boundary. We then check that we're not trying to contract past our minimum size, and free each frame in turn until we reach the desired size.
+</p>
+<p></p><h4>7.4.2.2. Allocation</h4>
+<p>We'll talk through the allocation function in parts.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>alloc</span>(<span class='code_primitive'>u32int</span>&nbsp;size,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;page_align,&nbsp;<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span>heap)<br/>
+{<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Make sure we take the size of header/footer into account.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;new_size&nbsp;<span class='code_operator'>=</span>&nbsp;size&nbsp;<span class='code_operator'>+</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>)&nbsp;<span class='code_operator'>+</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Find the smallest hole that will fit.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>s32int</span>&nbsp;iterator&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>find_smallest_hole</span>(new_size,&nbsp;page_align,&nbsp;heap);<br/>
+&nbsp;&nbsp;&nbsp;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(iterator&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_operator'>-</span><span class='code_integer'>1</span>)&nbsp;<span class='code_comment'>// If we didn't find a suitable hole</span><br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;...&nbsp;<span class='code_comment'>// Will be filled in in a second.</span><br/>
+&nbsp;&nbsp;&nbsp;}
+</div>
+</p>
+<p>Here we adjust the requested block size to account for the size of the header and footer. We then request the smallest hole available that will fit using our find_smallest_hole function. If we couldn't find one (find_smallest_hole() == -1), we go into some error-handling code. It's a bit beefy, so I'll come back to this to explain it.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>orig_hole_header&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>)<span class='code_function'>lookup_ordered_array</span>(iterator,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;orig_hole_pos&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)orig_hole_header;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;orig_hole_size&nbsp;<span class='code_operator'>=</span>&nbsp;orig_hole_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Here we work out if we should split the hole we found into two parts.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Is the original hole size - requested hole size less than the overhead for adding a new hole?</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(orig_hole_size<span class='code_operator'>-</span>new_size&nbsp;<span class='code_operator'>&lt;</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>)<span class='code_operator'>+</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>))<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Then just increase the requested size to the size of the hole we found.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;size&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;orig_hole_size<span class='code_operator'>-</span>new_size;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;new_size&nbsp;<span class='code_operator'>=</span>&nbsp;orig_hole_size;<br/>
+&nbsp;&nbsp;&nbsp;}
+</div>
+</p>
+<p>Here we get the header pointer from the index given us by find_smallest_hole. We then save the address and size of this header in case we need to overwrite it later. After this, we decide if it is worth splitting the hole in two (that is, will the free space be able to fit another hole into it?) If not, we increase the requested size to the hole size, so it isn't split.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If we need to page-align the data, do it now and make a new hole in front of our block.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(page_align&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span>&nbsp;orig_hole_pos<span class='code_operator'>&</span><span class='code_integer'>0</span>xFFFFF000)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;new_location&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;orig_hole_pos&nbsp;<span class='code_operator'>+</span>&nbsp;<span class='code_integer'>0</span>x1000&nbsp;<span class='code_comment'>/*&nbsp;page&nbsp;size&nbsp;*/</span>&nbsp;<span class='code_operator'>-</span>&nbsp;(orig_hole_pos<span class='code_operator'>&</span><span class='code_integer'>0</span>xFFF)&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>hole_header&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>)orig_hole_pos;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hole_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000&nbsp;<span class='code_comment'>/*&nbsp;page&nbsp;size&nbsp;*/</span>&nbsp;<span class='code_operator'>-</span>&nbsp;(orig_hole_pos<span class='code_operator'>&</span><span class='code_integer'>0</span>xFFF)&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hole_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hole_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>is_hole&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>hole_footer&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>)&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)new_location&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>)&nbsp;);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hole_footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hole_footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>header&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;hole_header;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;orig_hole_pos&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;new_location;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;orig_hole_size&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;orig_hole_size&nbsp;<span class='code_operator'>-</span>&nbsp;hole_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Else we don't need this hole any more, delete it from the index.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>remove_ordered_array</span>(iterator,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);<br/>
+&nbsp;&nbsp;&nbsp;}
+</div>
+</p>
+<p>If the user wants his memory to be page-aligned, we facilitate that here. The new location for the header to be placed at is calculated by going to the next page boundary then subtracting the size of a header. The attributes of the new hole's header are then filled in, along with the footer. Note that because we are creating a new hole at the old hole's address, we are essentially reusing the old hole, so there is no need to remove it from the hole index.
+<div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Overwrite the original header...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>block_header&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>)orig_hole_pos;<br/>
+&nbsp;&nbsp;&nbsp;block_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;block_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>is_hole&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;block_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;new_size;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// ...And the footer</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>block_footer&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>)&nbsp;(orig_hole_pos&nbsp;<span class='code_operator'>+</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>)&nbsp;<span class='code_operator'>+</span>&nbsp;size);<br/>
+&nbsp;&nbsp;&nbsp;block_footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;block_footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>header&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;block_header;
+</div>
+</p>
+<p>This should be self-explanatory - we make sure all the header and footer attributes are correct, along with magic numbers.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We may need to write a new hole after the allocated block.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We do this only if the new hole would have positive size...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(orig_hole_size&nbsp;<span class='code_operator'>-</span>&nbsp;new_size&nbsp;<span class='code_operator'>&gt;</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>hole_header&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>)&nbsp;(orig_hole_pos&nbsp;<span class='code_operator'>+</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>)&nbsp;<span class='code_operator'>+</span>&nbsp;size&nbsp;<span class='code_operator'>+</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hole_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hole_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>is_hole&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hole_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>=</span>&nbsp;orig_hole_size&nbsp;<span class='code_operator'>-</span>&nbsp;new_size;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>hole_footer&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>)&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)hole_header&nbsp;<span class='code_operator'>+</span>&nbsp;orig_hole_size&nbsp;<span class='code_operator'>-</span>&nbsp;new_size&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>)&nbsp;);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;((<span class='code_primitive'>u32int</span>)hole_footer&nbsp;<span class='code_operator'>&lt;</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hole_footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;hole_footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>header&nbsp;<span class='code_operator'>=</span>&nbsp;hole_header;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Put the new hole in the index;</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>insert_ordered_array</span>((<span class='code_primitive'>void</span><span class='code_operator'>*</span>)hole_header,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);<br/>
+&nbsp;&nbsp;&nbsp;}
+</div>
+</p>
+<p>If we wanted to split our hole in two, we do it here, creating a new hole.
+<div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// ...And we're done!</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;(<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span>)&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)block_header<span class='code_operator'>+</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>)&nbsp;);<br/>
+}
+</div>
+</p>
+<p>... And that's our allocation function! The only thing left to do is fill in the error-checking code we missed out earlier:
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(iterator&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_operator'>-</span><span class='code_integer'>1</span>)&nbsp;<span class='code_comment'>// If we didn't find a suitable hole</span><br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Save some previous data.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;old_length&nbsp;<span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address&nbsp;<span class='code_operator'>-</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;old_end_address&nbsp;<span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We need to allocate some more space.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>expand</span>(old_length<span class='code_operator'>+</span>new_size,&nbsp;heap);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;new_length&nbsp;<span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address<span class='code_operator'>-</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Find the endmost header. (Not endmost in size, but in location).</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;iterator&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Vars to hold the index of, and value of, the endmost header found so far.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;idx&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>-</span><span class='code_integer'>1</span>;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;value&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x0;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(iterator&nbsp;<span class='code_operator'>&lt;</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index.size)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;tmp&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)<span class='code_function'>lookup_ordered_array</span>(iterator,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(tmp&nbsp;<span class='code_operator'>&gt;</span>&nbsp;value)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;value&nbsp;<span class='code_operator'>=</span>&nbsp;tmp;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;idx&nbsp;<span class='code_operator'>=</span>&nbsp;iterator;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;iterator<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If we didn't find ANY headers, we need to add one.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(idx&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_operator'>-</span><span class='code_integer'>1</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>header&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>)old_end_address;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>=</span>&nbsp;new_length&nbsp;<span class='code_operator'>-</span>&nbsp;old_length;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>is_hole&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>footer&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>)&nbsp;(old_end_address&nbsp;<span class='code_operator'>+</span>&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>header&nbsp;<span class='code_operator'>=</span>&nbsp;header;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>insert_ordered_array</span>((<span class='code_primitive'>void</span><span class='code_operator'>*</span>)header,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The last header needs adjusting.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>header&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>lookup_ordered_array</span>(idx,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;new_length&nbsp;<span class='code_operator'>-</span>&nbsp;old_length;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Rewrite the footer.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>footer&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>)&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)header&nbsp;<span class='code_operator'>+</span>&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>)&nbsp;);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>header&nbsp;<span class='code_operator'>=</span>&nbsp;header;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We now have enough space. Recurse, and call the function again.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_function'>alloc</span>(size,&nbsp;page_align,&nbsp;heap);<br/>
+&nbsp;&nbsp;&nbsp;}
+</div>
+</p>
+<p>This code quite simple in function but verbose in code. If a hole big enough couldn't be found (iterator == -1), we must expand the size of the heap (by calling the <i>expand</i> function). We then have to account for this expansion in the index. The normal way to do this is to find the endmost hole in the index and adjust it's size. The only time this won't work is when there aren't any holes in the index at all (an unlikely but possible case). In this case we must make one to fill the gap.
+</p>
+<p></p><h4>7.4.2.3. Freeing</h4>
+<p>Again, I'll go through this step-by-step.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>free</span>(<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span>p,&nbsp;<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span>heap)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Exit gracefully for null pointers.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(p&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Get the header and footer associated with this pointer.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>header&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>header_t</span><span class='code_operator'>*</span>)&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)p&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>header_t</span>)&nbsp;);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>footer&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>footer_t</span><span class='code_operator'>*</span>)&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)header&nbsp;<span class='code_operator'>+</span>&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>)&nbsp;);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Sanity checks.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;HEAP_MAGIC);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;HEAP_MAGIC);
+</div>
+</p>
+<p>Initially we find the header by subtracting sizeof(header_t) from <i>p</i>, then use this to find the footer. Sanity checks are always a good idea, as they provide an early indication if your code has overwritten crucial data.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Make us a hole.</span><br/>
+&nbsp;&nbsp;&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>is_hole&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Do we want to add this header into the 'free holes' index?</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>char</span>&nbsp;do_add&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;
+</div>
+</p>
+<p>This block is being deallocated and so is now a hole. We also create a variable to hold whether we should add the header to the hole index (see algorithm description).
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Unify left</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If the thing immediately to the left of us is a footer...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>footer_t</span>&nbsp;<span class='code_operator'>*</span>test_footer&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>footer_t</span><span class='code_operator'>*</span>)&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)header&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>)&nbsp;);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(test_footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;HEAP_MAGIC&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;test_footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>is_hole&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;cache_size&nbsp;<span class='code_operator'>=</span>&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size;&nbsp;<span class='code_comment'>// Cache our current size.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;header&nbsp;<span class='code_operator'>=</span>&nbsp;test_footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>header;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Rewrite our header with the new one.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>header&nbsp;<span class='code_operator'>=</span>&nbsp;header;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Rewrite our footer to point to the new header.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;cache_size;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Change the size.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;do_add&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Since this header is already in the index, we don't want to add it again.</span><br/>
+&nbsp;&nbsp;&nbsp;}
+</div>
+</p>
+<p>This piece of code performs our <i>left unification</i>. By subtracting sizeof(header_t) from the header address, we can get a pointer to a footer. We check if this is actually a valid footer by checking it's magic number, and that it is a hole (not allocated!). If so, we rewrite our footer to point to the test footer's header, change our size, and instruct the algorithm not to add an entry to the hole index (as the header we just unified with was already in the index!).
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Unify right</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If the thing immediately to the right of us is a header...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>header_t</span>&nbsp;<span class='code_operator'>*</span>test_header&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>header_t</span><span class='code_operator'>*</span>)&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)footer&nbsp;<span class='code_operator'>+</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>)&nbsp;);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(test_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;HEAP_MAGIC&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;test_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>is_hole)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;test_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size;&nbsp;<span class='code_comment'>// Increase our size.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;test_footer&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>footer_t</span><span class='code_operator'>*</span>)&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)test_header&nbsp;<span class='code_operator'>+</span>&nbsp;<span class='code_comment'>// Rewrite it's footer to point to our header.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;test_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>)&nbsp;);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;footer&nbsp;<span class='code_operator'>=</span>&nbsp;test_footer;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Find and remove this header from the index.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;iterator&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(&nbsp;(iterator&nbsp;<span class='code_operator'>&lt;</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index.size)&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(<span class='code_function'>lookup_ordered_array</span>(iterator,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index)&nbsp;<span class='code_operator'>!=</span>&nbsp;(<span class='code_primitive'>void</span><span class='code_operator'>*</span>)test_header)&nbsp;)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;iterator<span class='code_operator'>++</span>;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Make sure we actually found the item.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(iterator&nbsp;<span class='code_operator'>&lt;</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index.size);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Remove it.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>remove_ordered_array</span>(iterator,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);<br/>
+&nbsp;&nbsp;&nbsp;}
+</div>
+</p>
+<p>Similarly, this code performs our <i>right unification</i>. Again, we test if the header immediately to our right is valid, and is a hole. We rewrite it's footer to point to our header, then remove it's header from the hole index.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If the footer location is the end address, we can contract.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)footer<span class='code_operator'>+</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>)&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;old_length&nbsp;<span class='code_operator'>=</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>end_address<span class='code_operator'>-</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;new_length&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>contract</span>(&nbsp;(<span class='code_primitive'>u32int</span>)header&nbsp;<span class='code_operator'>-</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>start_address,&nbsp;heap);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Check how big we will be after resizing.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>-</span>&nbsp;(old_length<span class='code_operator'>-</span>new_length)&nbsp;<span class='code_operator'>&gt;</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We will still exist, so resize us.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>-</span><span class='code_operator'>=</span>&nbsp;old_length<span class='code_operator'>-</span>new_length;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;footer&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>footer_t</span><span class='code_operator'>*</span>)&nbsp;(&nbsp;(<span class='code_primitive'>u32int</span>)header&nbsp;<span class='code_operator'>+</span>&nbsp;header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>size&nbsp;<span class='code_operator'>-</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>footer_t</span>)&nbsp;);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>magic&nbsp;<span class='code_operator'>=</span>&nbsp;HEAP_MAGIC;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;footer<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>header&nbsp;<span class='code_operator'>=</span>&nbsp;header;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We will no longer exist :(. Remove us from the index.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;iterator&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(&nbsp;(iterator&nbsp;<span class='code_operator'>&lt;</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index.size)&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(<span class='code_function'>lookup_ordered_array</span>(iterator,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index)&nbsp;<span class='code_operator'>!=</span>&nbsp;(<span class='code_primitive'>void</span><span class='code_operator'>*</span>)test_header)&nbsp;)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;iterator<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If we didn't find ourselves, we have nothing to remove.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(iterator&nbsp;<span class='code_operator'>&lt;</span>&nbsp;heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index.size)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>remove_ordered_array</span>(iterator,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;}
+</div>
+</p>
+<p>This is almost the last snippet (I promise!). If we are releasing the last hole in the index (that is, the one closest to the end of memory), then we can contract the heap size. We keep note of the old heap size, then call contract. One of two things can happen here. Either the contract() command will shrink the heap so our hole no longer exists (the 'else' case), or it will either partially contract or not contract at all. In which case our hole still exists, but we need to resize it. We rewrite it's footer with the new size, and exit. If the hole has been removed, we just look ourselves up in the heap index and delete ourselves.
+</p>
+<p>A small one to finish off with:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>if</span>&nbsp;(do_add&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>)<br/>
+&nbsp;&nbsp;<span class='code_function'>insert_ordered_array</span>((<span class='code_primitive'>void</span><span class='code_operator'>*</span>)&nbsp;header,&nbsp;<span class='code_operator'>&</span>heap<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>index);
+</div>
+</p>
+<p>If we are suppposed to add ourselves into the index, do it here. And that's it! The next thing to do is initialise the heap when paging is initialised :)
+</p>
+<p></p><h4>7.4.2.4. paging.c</h4>
+<p><div class='code'>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_typedef'>heap_t</span>&nbsp;<span class='code_operator'>*</span>kheap;
+</div>
+</p>
+<p>We declare the variable <i>kheap</i> as our kernel heap. We define this in kheap.c (you can do that yourself) and reference it here.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Map some pages in the kernel heap area.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Here we call get_page but not alloc_frame. This causes page_table_t's</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// to be created where necessary. We can't allocate frames yet because they</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// they need to be identity mapped first below, and yet we can't increase</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// placement_address between identity mapping and enabling the heap!</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;KHEAP_START;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;KHEAP_START<span class='code_operator'>+</span>KHEAP_INITIAL_SIZE;&nbsp;i&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>get_page</span>(i,&nbsp;<span class='code_integer'>1</span>,&nbsp;kernel_directory);
+</div>
+</p>
+<p>This goes in <i>initialise_paging</i>, before we identity map from 0-placement_addr. There is a reason for this code. As the kernel heap is up at 0xC0000000, when we write to it some page tables will need to be created (beacause nothing near that area has been accessed before). However, after we finish the identity-mapping loop allocating everything up to placement_address, we can't use kmalloc any more until our heap is active! So, we need to force the tables to be created <b>before</b> we freeze the placement address. That's what this code does.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Now allocate those pages we mapped earlier.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;KHEAP_START;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;KHEAP_START<span class='code_operator'>+</span>KHEAP_INITIAL_SIZE;&nbsp;i&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>alloc_frame</span>(&nbsp;<span class='code_function'>get_page</span>(i,&nbsp;<span class='code_integer'>1</span>,&nbsp;kernel_directory),&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Before we enable paging, we must register our page fault handler.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>register_interrupt_handler</span>(<span class='code_integer'>14</span>,&nbsp;page_fault);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Now, enable paging!</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>switch_page_directory</span>(kernel_directory);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the kernel heap.</span><br/>
+&nbsp;&nbsp;&nbsp;kheap&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>create_heap</span>(KHEAP_START,&nbsp;KHEAP_START<span class='code_operator'>+</span>KHEAP_INITIAL_SIZE,&nbsp;<span class='code_integer'>0</span>xCFFFF000,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>);
+</div>
+</p>
+<p>Et voila! you are complete! A nice thing to do (which I have done in my sample code) is to get kmalloc/kfree to pass calls straight through to alloc/free if kheap != 0. I'll leave that to you to do ;)
+<div class='code'>
+</p>
+<p></div>
+</p><h2>7.5. Testing</h2>
+<p><i>main.c</i>
+<div class='code'>
+<span class='code_primitive'>u32int</span>&nbsp;a&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_integer'>8</span>);<br/>
+<span class='code_function'>initialise_paging</span>();<br/>
+<span class='code_primitive'>u32int</span>&nbsp;b&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_integer'>8</span>);<br/>
+<span class='code_primitive'>u32int</span>&nbsp;c&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_integer'>8</span>);<br/>
+<span class='code_function'>monitor_write</span>(<span class='code_string'>"a:&nbsp;"</span>);<br/>
+<span class='code_function'>monitor_write_hex</span>(a);<br/>
+<span class='code_function'>monitor_write</span>(<span class='code_string'>",&nbsp;b:&nbsp;"</span>);<br/>
+<span class='code_function'>monitor_write_hex</span>(b);<br/>
+<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\n</span>c:&nbsp;"</span>);<br/>
+<span class='code_function'>monitor_write_hex</span>(c);<br/>
+<br/>
+<span class='code_function'>kfree</span>(c);<br/>
+<span class='code_function'>kfree</span>(b);<br/>
+<span class='code_primitive'>u32int</span>&nbsp;d&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>kmalloc</span>(<span class='code_integer'>12</span>);<br/>
+<span class='code_function'>monitor_write</span>(<span class='code_string'>",&nbsp;d:&nbsp;"</span>);<br/>
+<span class='code_function'>monitor_write_hex</span>(d);
+</div>
+</p>
+<p><div class='image_frame'><img src='images/the_heap_bochs.png' /><br/><span class='image_caption'>Success!</span></div>You can, of course, experiment with the order of allocations and frees here. The code above will allocate one variable, <i>a</i>, before initialise_paging is called, so it'll be allocated via placement address. <i>b</i> and <i>c</i> both get allocated on the heap, and printed out. They are then both freed and another variable, <i>d</i>, created. If the address of <i>d</i> is the same as the address of <i>b</i>, then the space reclaimed by <i>b</i> and <i>c</i> has been successfully unified and all is good!
+</p>
+<p></p><h2>7.6. Summary</h2>
+<p>Dynamic memory allocation is one of the few things that it is very difficult to do without. Without it, you would have to specify an absolute maximum number of processes running (static array of pids), you would have to statically give the size of every buffer - Generally making your OS lacklustre and woefully inefficient.
+</p>
+<p>Sample code, as ever, can be found <a href='/downloads/the_heap.tar.gz'>here</a>.</p></div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+</body></html>

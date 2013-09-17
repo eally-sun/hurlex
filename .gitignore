@@ -1,17 +1,13 @@
-# Object files
+# Compiled Object files
 *.o
+.clang_complete
 
-# Libraries
-*.lib
-*.a
+# The Program files
+*.img
+kernel
 
-# Shared objects (inc. Windows DLLs)
-*.dll
+# Compiled Dynamic libraries
 *.so
-*.so.*
-*.dylib
 
-# Executables
-*.exe
-*.out
-*.app
+# Compiled Static libraries
+*.a

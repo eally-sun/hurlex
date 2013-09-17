@@ -1,0 +1,85 @@
+<link rel='stylesheet' type='text/css' href='/highlight.css'><link rel='stylesheet' type='text/css' href='/layout.css'><!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+
+<title>JamesM's kernel development tutorials</title>
+
+<div class="header">
+  <div style="float: right;">
+      <script type="text/javascript"><!--
+google_ad_client = "pub-2761421417962228";
+/* 468x60, created 22/05/08 */
+google_ad_slot = "5309073637";
+google_ad_width = 468;
+google_ad_height = 60;
+//-->
+      </script>
+      <script type="text/javascript" src="http://pagead2.googlesyndication.com/pagead/show_ads.js">
+      </script>
+    </div>
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="http://www.jamesmolloy.co.uk/index.html">Home</a> &raquo;
+		JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+	<h1>Roll your own toy UNIX-clone OS</h1>
+	<p>This set of tutorials aims to take you through programming a simple UNIX-clone operating system for the x86 
+architecture.
+	The tutorial uses C as the language of choice, with liberally mixed in bits of assembler. The aim is to talk you through 
+	the design and implementation decisions in making an operating system. The OS we make is monolithic in design (drivers are 
+	loaded through kernel-mode modules as opposed to user-mode programs), as this is simpler.</p>
+
+	<p>This set of tutorials is very practical in nature. The theory is given in every section, but the majority of the 
+tutorial deals with getting dirty and implementing the abstract ideas and mechanisms discussed everywhere. It is important to 
+note that the kernel implemented is a <b>teaching kernel</b>. I <b>know</b> that the algorithms used are not the most space 
+efficient or optimal. They normally are chosen for their simplicity and ease of understanding.The aim of this is to get you into 
+the correct 
+mindset, and to give you a grounding 
+upon which 
+you can 
+work. The kernel given is extensible, and good algorithms can easily be plugged in.If you have problems 
+with the theory, there are plenty of sites that would be delighted to help you (most questions on OSDev forums are concerned with 
+implementation - "My gets function doesn't work! help!" - A theory question is a breath of fresh air to many ;) ). Links can be 
+found at the bottom of the page.
+
+	<h2>Table of contents</h2>
+	<div class="toc_wrapper">
+<div class='index'>
+<a href='1.-Environment setup.html'>1. Environment setup</a><br/><a href='2.-Genesis.html'>2. Genesis</a><br/><a href='3.-The Screen.html'>3. The Screen</a><br/><a href='4.-The GDT and IDT.html'>4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html'>5. IRQs and the PIT</a><br/><a href='6.-Paging.html'>6. Paging</a><br/><a href='7.-The Heap.html'>7. The Heap</a><br/><a href='8.-The VFS and the initrd.html'>8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html'>9. Multitasking</a><br/><a href='10.-User Mode.html'>10. User Mode</a><br/></div>
+</div>
+<h2>Prerequisites</h2>
+
+<p>To compile and run the sample code I provide requires just GCC, ld, NASM and GNU Make. NASM is an open-source x86 assembler, 
+and is the assembler-of-choice for many x86 OS-devs.</p>
+
+<p>There is no point, however, in just compiling and running without comprehension. You must <i>understand</i> what is being 
+coded, and as such you should have a very strong knowledge of C, especially regarding pointers. You should also know a little bit 
+of assembly (Intel syntax is used in these tutorials), including what the EBP register is used for.</p>
+
+<h2>Resources</h2>
+
+<p>There are plenty of resources out there if you <a href="http://www.google.com">know where to look</a>. In particular, you 
+should find these useful:</p>
+
+<ul>
+<li><a href="http://www.intel.com/products/processor/manuals/index.htm">RTFM!</a> The intel manuals are a godsend</li>
+<li><a href="http://www.osdev.org/wiki">The osdev.org wiki</a> and <a href="http://www.osdev.org/forum">forums</a>.</li>
+<li><a href="http://www.osdever.net">Osdever.net</a> has many good tutorials and papers, and in particular
+<a href="http://www.osdever.net/bkerndev/index.php">Bran's kernel development tutorials</a>, which some of the earlier code from 
+this tutorial is based off. (I myself used these tutorials to get started, and the code is so good I haven't had to change it over 
+the years</li>
+<li><a href="http://groups.google.co.uk/group/alt.os.development/topics">alt.os.development</a> can answer many of your non-n00b 
+questions. N00b questions are better asked on the osdever.net forums.</li>
+</ul>
+
+</div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+<script type="text/javascript">
+var gaJsHost = (("https:" == document.location.protocol) ? "https://ssl." : "http://www.");
+document.write(unescape("%3Cscript src='" + gaJsHost + "google-analytics.com/ga.js' type='text/javascript'%3E%3C/script%3E"));
+</script>
+<script type="text/javascript">
+var pageTracker = _gat._getTracker("UA-3513903-1");
+pageTracker._initData();
+pageTracker._trackPageview();
+</script>

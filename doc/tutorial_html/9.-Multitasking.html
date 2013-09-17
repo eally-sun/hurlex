@@ -1,0 +1,755 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><title>9.-Multitasking</title><link rel='stylesheet' type='text/css' href='css/highlight.css'><link rel='stylesheet' type='text/css' href='css/layout.css'></head><body><div class="header">
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="index.html">Home</a> &raquo;
+	 	JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+
+<div class='index'>
+<a href='1.-Environment setup.html'>1. Environment setup</a><br/><a href='2.-Genesis.html'>2. Genesis</a><br/><a href='3.-The Screen.html'>3. The Screen</a><br/><a href='4.-The GDT and IDT.html'>4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html'>5. IRQs and the PIT</a><br/><a href='6.-Paging.html'>6. Paging</a><br/><a href='7.-The Heap.html'>7. The Heap</a><br/><a href='8.-The VFS and the initrd.html'>8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html' class='selected' >9. Multitasking</a><br/><a href='10.-User Mode.html'>10. User Mode</a><br/></div>
+<h1>9. Multitasking</h1>
+<p>Eventually most people want to have their OS run two things (seemingly) at once. This is called multitasking, and is in my opinion one of the final hurdles before you can call your project an 'operating system' or 'kernel'.
+</p>
+<p></p><h2>9.1. Tasking theory</h2>
+<p>Firstly a quick recap; A CPU (with one core) cannot run multiple tasks simultaneously. Instead we rely on switching tasks quickly enough that it seems to an observer that they are all running at the same time. Each task gets given a "timeslice" or a "time to live" in which to use the CPU and memory. That timeslice is normally ended by a timer interrupt which calls the scheduler.
+</p>
+<p><i>It should be noted that in more advanced operating systems a process' timeslice will normally also be terminated when it performs a synchronous I/O operation, and in such operating systems (all but the most trivial) this is the normal case.</i>
+</p>
+<p>When the scheduler is called, it saves the stack and base pointers in a task structure, restores the stack and base pointers of the process to switch to, switches address spaces, and jumps to the instruction that the new task left off at the last time it was swapped.
+</p>
+<p>This relies on several things:
+</p>
+<p><ol>
+<li><i>All the general purpose registers are already saved.</i> This happens in the IRQ handler, so is automatic.</li>
+<li><i>The task switch code can be run seamlessly when changing address spaces.</i> The task switch code should be able to change address spaces and then continue executing as if nothing happened. This means that the kernel code must be mapped in at the same place in all address spaces.</li>
+</ol>
+</p>
+<p></p><h3>9.1.1. Some notes about address spaces</h3>
+<p><div class='image_frame'><img src='images/tasking_fork.png' /><br/><span class='image_caption'>Address space layout</span></div>
+A lot of the complication in implementing multitasking is not just the context switching - a new address space must be created for each task. The complication is that some parts of the address space must be copied, and others must be linked. That is, two pages point to the same frame in physical memory. Take the example layout on the right - The picture shows two virtual address spaces and how areas are mapped to an example physical RAM layout.
+</p>
+<p>The stack is indicative of most areas in a virtual address space: it is copied when a new process is forked, so that if the new process changes data the old process doesn't see the change. When we load executables, this will also be the case for the executable code and data.
+</p>
+<p>The kernel code and heap areas are slightly different - both areas in both virtual memory spaces map to the same two areas of physical memory. Firstly there is no point in copying the kernel code as it will never change, and secondly it is important that the kernel heap is consistent in all address spaces - if task 1 does a system call and causes some data to be changed the kernel must be able to pick that up in task 2's address space.
+</p>
+<p></p><h2>9.2. Cloning an address space</h2>
+<p>So, as mentioned above, one of the most complex things we need to do is to create a copy of an address space - so let's get that over with first.
+</p>
+<p></p><h3>9.2.1. Cloning a directory</h3>
+<p>First off we need to create a new directory. We use our kmalloc_ap function to obtain an address aligned on a page boundary and to also retrieve the physical address. We then have to ensure that it is completely blank (each entry is initially zero).
+</p>
+<p><div class='code'>
+<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>clone_directory</span>(<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>src)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;phys;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Make a new page directory and obtain its physical address.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>dir&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>page_directory_t</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc_ap</span>(<span class='code_function'>sizeof</span>(<span class='code_typedef'>page_directory_t</span>),&nbsp;<span class='code_operator'>&</span>phys);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Ensure that it is blank.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(dir,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>page_directory_t</span>));
+</div>
+</p>
+<p>We now have a new page directory, and the physical address at which it is located. However, for loading into the CR3 register, we need the physical address of the <i>tablesPhysical</i> member (remember that the physical address of a directory's page tables are held in <i>tablesPhysical</i>. See chapter 6). In order to do this, we perform a simple calculation. We get the offset of the <i>tablesPhysical</i> member from the start of the page_directory_t struct, then add that to the obtained physical address.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Get the offset of tablesPhysical from the start of the page_directory_t structure.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;offset&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tablesPhysical&nbsp;<span class='code_operator'>-</span>&nbsp;(<span class='code_primitive'>u32int</span>)dir;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Then the physical address of dir->tablesPhysical is:</span><br/>
+&nbsp;&nbsp;&nbsp;dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>physicalAddr&nbsp;<span class='code_operator'>=</span>&nbsp;phys&nbsp;<span class='code_operator'>+</span>&nbsp;offset;
+</div>
+</p>
+<p>Now we're ready to copy each page table. If the page table is zero, we don't need to bother copying anything.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>1024</span>;&nbsp;i<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(<span class='code_operator'>!</span>src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[i])<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;continue;
+</div>
+</p>
+<p>Now we need a method of working out whether we should <i>link</i> a page table or <i>copy</i> it. Remember that we want to link the kernel code and heap, and copy everything else. Luckily, we already have a very simple method of finding out. The global variable <i>kernel_directory</i> is the first page directory we create. We identity map the kernel code and data, and map in the kernel heap all in this directory. Up until now, we've finished off the <i>initialise_paging</i> function with this:
+</p>
+<p><div class='code'>
+current_directory&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;kernel_directory;
+</div>
+</p>
+<p>But, if instead we set current_directory to a <i>clone</i> of the kernel_directory, kernel_directory will remain constant, just containing the kernel code/data and the kernel heap. All modifications will be made to the clone, and not the original. This means that in our <i>clone</i> function we can compare page tables with the kernel_directory. If a page table in the directory we are cloning is <i>also in the kernel_directory</i>, we can assume that that page table should be linked. If not, it should be copied. Simple!
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(kernel_directory<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[i]&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[i])<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// It's in the kernel, so just use the same pointer.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[i]&nbsp;<span class='code_operator'>=</span>&nbsp;src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[i];<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tablesPhysical[i]&nbsp;<span class='code_operator'>=</span>&nbsp;src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tablesPhysical[i];<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Copy the table.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;phys;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[i]&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>clone_table</span>(src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tables[i],&nbsp;<span class='code_operator'>&</span>phys);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tablesPhysical[i]&nbsp;<span class='code_operator'>=</span>&nbsp;phys&nbsp;<span class='code_operator'>|</span>&nbsp;<span class='code_integer'>0</span>x07;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}
+</div>
+</p>
+<p>Let's quickly go through that code segment. If the current page table is the same in the kernel directory and in the current directory, we link it - that is, in the new directory, we set the page table pointer to be the same as in the source directory. We also copy the physical address of this page table (very important - this is the address that matters to the processor). If, instead, we need to copy the table, we use an (as yet) undefined function called <i>clone_table</i>, which returns a virtual pointer to a page table, and stores its physical address in a passed-in argument. When setting the tablesPhysical pointer, we bitwise-OR the physical address with 0x07, which means "Present, Read-write, user-mode".
+</p>
+<p>Let's just quickly end this function, then we can go on to define <i>clone_table</i>.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;dir;
+</div>
+}
+</p>
+<p></p><h3>9.2.2. Cloning a table</h3>
+<p>To clone a page table, we have to do something similar to above, with some changes. We never have to choose whether to copy or link table entries - we always copy. We also have to copy the data in the page table entries.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_typedef'>page_table_t</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>clone_table</span>(<span class='code_typedef'>page_table_t</span>&nbsp;<span class='code_operator'>*</span>src,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_operator'>*</span>physAddr)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Make a new page table, which is page aligned.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>page_table_t</span>&nbsp;<span class='code_operator'>*</span>table&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>page_table_t</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc_ap</span>(<span class='code_function'>sizeof</span>(<span class='code_typedef'>page_table_t</span>),&nbsp;physAddr);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Ensure that the new table is blank.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(table,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>page_directory_t</span>));<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// For every entry in the table...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>1024</span>;&nbsp;i<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(<span class='code_operator'>!</span>src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].frame)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;continue;
+</div>
+</p>
+<p>The preamble for this function is exactly the same as in <i>clone_directory</i>.
+</p>
+<p>So, for every page table entry in the table, we need to:
+<ul>
+<li>Allocate ourselves a new frame to hold the copied data.</li>
+<li>Copy the flags - read/write, present, user-mode etc.</li>
+<li>Physically copy the data.</li>
+</ul>
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Get a new frame.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>alloc_frame</span>(<span class='code_operator'>&</span>table<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i],&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Clone the flags from source to destination.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].present)&nbsp;table<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].present&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].rw)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;table<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].rw&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].user)&nbsp;&nbsp;&nbsp;&nbsp;table<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].user&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].accessed)table<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].accessed&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].dirty)&nbsp;&nbsp;&nbsp;table<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].dirty&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Physically copy the data across. This function is in process.s.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>copy_page_physical</span>(src<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].frame<span class='code_operator'>*</span><span class='code_integer'>0</span>x1000,&nbsp;table<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>pages[i].frame<span class='code_operator'>*</span><span class='code_integer'>0</span>x1000);
+</div>
+</p>
+<p>All fairly simple. We use a function which (again) is as yet undefined, called copy_page_physical. We'll define that in a second, just after we end this function.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;table;<br/>
+}
+</div>
+</p>
+<p></p><h3>9.2.3. Copying a physical frame</h3>
+<p><i>copy_page_physical</i> is really a misnomer. What we actually want to do is copy the contents of one <i>frame</i> into another <i>frame</i>. This, unfortunately, involves disabling paging (so we can access all of physical RAM), so we write this as a pure assembler function. This should go in a file called 'process.s'.
+</p>
+<p><div class='code'>
+[<span class='code_primitive'>GLOBAL</span>&nbsp;copy_page_physical]<br/>
+<span class='code_label'>copy_page_physical:</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;ebx&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; According to __cdecl, we must preserve the contents of EBX.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>push</span>f&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; push EFLAGS, so we can pop it and reenable interrupts</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; later, if they were enabled anyway.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>cli</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Disable interrupts, so we aren't interrupted.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Load these in BEFORE we disable paging!</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ebx,&nbsp;[esp+12]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Source address</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ecx,&nbsp;[esp+16]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Destination address</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;edx,&nbsp;cr0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Get the control register...</span><br/>
+&nbsp;&nbsp;&nbsp;and&nbsp;edx,&nbsp;0x7fffffff&nbsp;&nbsp;&nbsp;<span class='code_comment'>; and...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;cr0,&nbsp;edx&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Disable paging.</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;edx,&nbsp;1024&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; 1024*4bytes = 4096 bytes to copy</span><br/>
+<br/>
+<span class='code_label'>.loop:</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;eax,&nbsp;[ebx]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Get the word at the source address</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;[ecx],&nbsp;eax&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Store it at the dest address</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>add</span>&nbsp;ebx,&nbsp;4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Source address += sizeof(word)</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>add</span>&nbsp;ecx,&nbsp;4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Dest address += sizeof(word)</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>dec</span>&nbsp;edx&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; One less word to do</span><br/>
+&nbsp;&nbsp;&nbsp;jnz&nbsp;.loop<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;edx,&nbsp;cr0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Get the control register again</span><br/>
+&nbsp;&nbsp;&nbsp;or&nbsp;&nbsp;edx,&nbsp;0x80000000&nbsp;&nbsp;&nbsp;<span class='code_comment'>; and...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;cr0,&nbsp;edx&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Enable paging.</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>pop</span>f&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Pop EFLAGS back.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>pop</span>&nbsp;ebx&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Get the original value of EBX back.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>ret</span>
+</div>
+</p>
+<p>Hopefully the comments should make it clear what is happening. Anyway, that's a directory successfully cloned! We should now add a call to this in <i>initialise_paging</i>, as mentioned above.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>initialise_paging</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The size of physical memory. For the moment we</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// assume it is 16MB big.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;mem_end_page&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000000;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;nframes&nbsp;<span class='code_operator'>=</span>&nbsp;mem_end_page&nbsp;<span class='code_operator'>/</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;frames&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc</span>(<span class='code_function'>INDEX_FROM_BIT</span>(nframes));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(frames,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_function'>INDEX_FROM_BIT</span>(nframes));<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Let's make a page directory.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;phys;&nbsp;<span class='code_comment'>// ********** ADDED ***********</span><br/>
+&nbsp;&nbsp;&nbsp;kernel_directory&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>page_directory_t</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc_a</span>(<span class='code_function'>sizeof</span>(<span class='code_typedef'>page_directory_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memset</span>(kernel_directory,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_function'>sizeof</span>(<span class='code_typedef'>page_directory_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// *********** MODIFIED ************</span><br/>
+&nbsp;&nbsp;&nbsp;kernel_directory<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>physicalAddr&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)kernel_directory<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>tablesPhysical;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Map some pages in the kernel heap area.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Here we call get_page but not alloc_frame. This causes page_table_t's</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// to be created where necessary. We can't allocate frames yet because they</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// they need to be identity mapped first below, and yet we can't increase</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// placement_address between identity mapping and enabling the heap!</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;KHEAP_START;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;KHEAP_END;&nbsp;i&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>get_page</span>(i,&nbsp;<span class='code_integer'>1</span>,&nbsp;kernel_directory);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We need to identity map (phys addr = virt addr) from</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// 0x0 to the end of used memory, so we can access this</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// transparently, as if paging wasn't enabled.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// NOTE that we use a while loop here deliberately.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// inside the loop body we actually change placement_address</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// by calling kmalloc(). A while loop causes this to be</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// computed on-the-fly rather than once at the start.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Allocate a lil' bit extra so the kernel heap can be</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// initialised properly.</span><br/>
+&nbsp;&nbsp;&nbsp;i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;placement_address<span class='code_operator'>+</span><span class='code_integer'>0</span>x1000)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Kernel code is readable but not writeable from userspace.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>alloc_frame</span>(&nbsp;<span class='code_function'>get_page</span>(i,&nbsp;<span class='code_integer'>1</span>,&nbsp;kernel_directory),&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Now allocate those pages we mapped earlier.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;KHEAP_START;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;KHEAP_START<span class='code_operator'>+</span>KHEAP_INITIAL_SIZE;&nbsp;i&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>alloc_frame</span>(&nbsp;<span class='code_function'>get_page</span>(i,&nbsp;<span class='code_integer'>1</span>,&nbsp;kernel_directory),&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Before we enable paging, we must register our page fault handler.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>register_interrupt_handler</span>(<span class='code_integer'>14</span>,&nbsp;page_fault);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Now, enable paging!</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>switch_page_directory</span>(kernel_directory);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the kernel heap.</span><br/>
+&nbsp;&nbsp;&nbsp;kheap&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>create_heap</span>(KHEAP_START,&nbsp;KHEAP_START<span class='code_operator'>+</span>KHEAP_INITIAL_SIZE,&nbsp;<span class='code_integer'>0</span>xCFFFF000,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>0</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// ******** ADDED *********</span><br/>
+&nbsp;&nbsp;&nbsp;current_directory&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>clone_directory</span>(kernel_directory);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>switch_page_directory</span>(current_directory);<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>switch_page_directory</span>(<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>dir)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;current_directory&nbsp;<span class='code_operator'>=</span>&nbsp;dir;<br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%0,&nbsp;%%cr3"</span>::&nbsp;<span class='code_string'>"r"</span>(dir<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>physicalAddr));&nbsp;<span class='code_comment'>// ******** MODIFIED *********</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;cr0;<br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%%cr0,&nbsp;%0"</span>:&nbsp;<span class='code_string'>"=r"</span>(cr0));<br/>
+&nbsp;&nbsp;&nbsp;cr0&nbsp;<span class='code_operator'>|=</span>&nbsp;<span class='code_integer'>0</span>x80000000;&nbsp;<span class='code_comment'>// Enable paging!</span><br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%0,&nbsp;%%cr0"</span>::&nbsp;<span class='code_string'>"r"</span>(cr0));<br/>
+}
+</div>
+</p>
+<p>(It should be noted that a function prototype for <i>clone_directory</i> should be put in the 'paging.h' header file.)
+</p>
+<p></p><h2>9.3. Creating a new stack</h2>
+<p>Currently, we have been using an undefined stack. What does that mean? well, GRUB leaves us, stack-wise, in an undefined state. The stack pointer could be anywhere. In all practical situations, GRUB's default stack location is large enough for our startup code to run without problems. However, it is in lower memory (somewhere around 0x7000 physical), which causes us problems as it'll be 'linked' instead of 'copied' when a page directory is changed (because the area from 0x0 - approx 0x150000 is mapped in the kernel_directory). So, we really need to move the stack.
+</p>
+<p>Moving the stack is not particularly difficult. We just memcpy() the data in the old stack over to where the new stack should be. However, there is a problem. When a new stack frame is created (for example, when entering a function) the EBP register is pushed onto the stack. This base pointer is used by the compiler to work out how to reference local variables. If we plainly copy the stack over, these pushed EBP values will point to locations on the <i>old</i> stack, not the new one! So we need to change them manually.
+</p>
+<p>Unfortunately, first, we need to know exactly where the current stack starts! To do this, we have to add an instruction right at the start, in boot.s:
+</p>
+<p><div class='code'>
+&nbsp;<span class='code_comment'>; Add this just before "push ebx".</span><br/>
+&nbsp;<span class='code_operator'>push</span>&nbsp;esp
+</div>
+</p>
+<p>This passes another parameter to main() - the initial stack pointer. We need to modify main() to take this extra parameter also:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>u32int</span>&nbsp;initial_esp;&nbsp;<span class='code_comment'>// New global variable.</span>
+</div>
+</p>
+<p><div class='code'>
+int&nbsp;main(struct&nbsp;multiboot&nbsp;*mboot_ptr,&nbsp;u32int&nbsp;initial_stack)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;initial_esp&nbsp;=&nbsp;initial_stack;
+</div>
+</p>
+<p>Good. Now we have what we need to start moving the stack. The following function should be in a new file, "task.c".
+</p>
+<p><div class='code'>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>move_stack</span>(<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span>new_stack_start,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;size)<br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;i;<br/>
+&nbsp;&nbsp;<span class='code_comment'>// Allocate some space for the new stack.</span><br/>
+&nbsp;&nbsp;<span class='code_primitive'>for</span>(&nbsp;i&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)new_stack_start;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>=</span>&nbsp;((<span class='code_primitive'>u32int</span>)new_stack_start<span class='code_operator'>-</span>size);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i&nbsp;<span class='code_operator'>-</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x1000)<br/>
+&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// General-purpose stack is in user-mode.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>alloc_frame</span>(&nbsp;<span class='code_function'>get_page</span>(i,&nbsp;<span class='code_integer'>1</span>,&nbsp;current_directory),&nbsp;<span class='code_integer'>0</span>&nbsp;<span class='code_comment'>/*&nbsp;User&nbsp;mode&nbsp;*/</span>,&nbsp;<span class='code_integer'>1</span>&nbsp;<span class='code_comment'>/*&nbsp;Is&nbsp;writable&nbsp;*/</span>&nbsp;);<br/>
+&nbsp;&nbsp;}
+</div>
+</p>
+<p>Now, we've changed a page table. So we need to inform the processor that a mapping has changed. This is called "Flushing the TLB (translation lookaside buffer)". It can be done partially, using the "invlpg" instruction, or fully, by simply writing to cr3. We choose the simpler latter option.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;<span class='code_comment'>// Flush the TLB by reading and writing the page directory address again.</span><br/>
+&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;pd_addr;<br/>
+&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%%cr3,&nbsp;%0"</span>&nbsp;:&nbsp;<span class='code_string'>"=r"</span>&nbsp;(pd_addr));<br/>
+&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%0,&nbsp;%%cr3"</span>&nbsp;:&nbsp;:&nbsp;<span class='code_string'>"r"</span>&nbsp;(pd_addr));
+</div>
+</p>
+<p>Next, we read the current stack and base pointers, and calculate an offset to get from an address on the old stack to an address on the new stack, and use it to calculate the new stack/base pointers.
+</p>
+<p><div class='code'>
+&nbsp;<span class='code_comment'>// Old ESP and EBP, read from registers.</span><br/>
+&nbsp;<span class='code_primitive'>u32int</span>&nbsp;old_stack_pointer;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%%esp,&nbsp;%0"</span>&nbsp;:&nbsp;<span class='code_string'>"=r"</span>&nbsp;(old_stack_pointer));<br/>
+&nbsp;<span class='code_primitive'>u32int</span>&nbsp;old_base_pointer;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%%ebp,&nbsp;%0"</span>&nbsp;:&nbsp;<span class='code_string'>"=r"</span>&nbsp;(old_base_pointer));
+</div>
+</p>
+<p><div class='code'>
+&nbsp;u32int&nbsp;offset&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;(u32int)new_stack_start&nbsp;-&nbsp;initial_esp;
+</div>
+</p>
+<p><div class='code'>
+&nbsp;u32int&nbsp;new_stack_pointer&nbsp;=&nbsp;old_stack_pointer&nbsp;+&nbsp;offset;<br/>
+&nbsp;u32int&nbsp;new_base_pointer&nbsp;&nbsp;=&nbsp;old_base_pointer&nbsp;&nbsp;+&nbsp;offset;
+</div>
+</p>
+<p>Great. Now we can actually copy the stack.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Copy the stack.</span><br/>
+<span class='code_function'>memcpy</span>((<span class='code_primitive'>void</span><span class='code_operator'>*</span>)new_stack_pointer,&nbsp;(<span class='code_primitive'>void</span><span class='code_operator'>*</span>)old_stack_pointer,&nbsp;initial_esp<span class='code_operator'>-</span>old_stack_pointer);
+</div>
+</p>
+<p>Now we try and go through the new stack, looking for base pointers to change. Here we use an algorithm which is not fool-proof. We assume that any value on the stack which is in the range of the stack (old_stack_pointer < x < initial_esp) is a pushed EBP. This will, unfortunately, completely trash any value which isn't an EBP but just happens to be in this range. Oh well, these things happen.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Backtrace through the original stack, copying new values into</span><br/>
+<span class='code_comment'>// the new stack.</span><br/>
+<span class='code_primitive'>for</span>(i&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span>)new_stack_start;&nbsp;i&nbsp;<span class='code_operator'>&gt;</span>&nbsp;(<span class='code_primitive'>u32int</span>)new_stack_start<span class='code_operator'>-</span>size;&nbsp;i&nbsp;<span class='code_operator'>-</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>4</span>)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;tmp&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>*</span>&nbsp;(<span class='code_primitive'>u32int</span><span class='code_operator'>*</span>)i;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If the value of tmp is inside the range of the old stack, assume it is a base pointer</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// and remap it. This will unfortunately remap ANY value in this range, whether they are</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// base pointers or not.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;((&nbsp;old_stack_pointer&nbsp;<span class='code_operator'>&lt;</span>&nbsp;tmp)&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span>&nbsp;(tmp&nbsp;<span class='code_operator'>&lt;</span>&nbsp;initial_esp))<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tmp&nbsp;<span class='code_operator'>=</span>&nbsp;tmp&nbsp;<span class='code_operator'>+</span>&nbsp;offset;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_operator'>*</span>tmp2&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u32int</span><span class='code_operator'>*</span>)i;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>*</span>tmp2&nbsp;<span class='code_operator'>=</span>&nbsp;tmp;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+}
+</div>
+</p>
+<p>Lastly we just need to actually change the stack and base pointers.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;<span class='code_comment'>// Change stacks.</span><br/>
+&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%0,&nbsp;%%esp"</span>&nbsp;:&nbsp;:&nbsp;<span class='code_string'>"r"</span>&nbsp;(new_stack_pointer));<br/>
+&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%0,&nbsp;%%ebp"</span>&nbsp;:&nbsp;:&nbsp;<span class='code_string'>"r"</span>&nbsp;(new_base_pointer));<br/>
+}
+</div>
+</p>
+<p></p><h2>9.4. Actual multitasking code</h2>
+<p>Now that we've got the necessary support functions written, we can actually start writing some tasking code.
+</p>
+<p>Firstly in task.h, we'll need some definitions.
+</p>
+<p><div class='code'>
+<span class='code_comment'>//</span><br/>
+<span class='code_comment'>// task.h - Defines the structures and prototypes needed to multitask.</span><br/>
+<span class='code_comment'>//          Written for JamesM's kernel development tutorials.</span><br/>
+<span class='code_comment'>//</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>ifndef</span>&nbsp;TASK_H<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;TASK_H<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"paging.h"<br/>
+</span><br/>
+<span class='code_comment'>// This structure defines a 'task' - a process.</span><br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;task<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;id;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Process ID.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;esp,&nbsp;ebp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Stack and base pointers.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;eip;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Instruction pointer.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>page_directory;&nbsp;<span class='code_comment'>// Page directory.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>struct</span>&nbsp;task&nbsp;<span class='code_operator'>*</span>next;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The next task in a linked list.</span><br/>
+}&nbsp;<span class='code_typedef'>task_t</span>;<br/>
+<br/>
+<span class='code_comment'>// Initialises the tasking system.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>initialise_tasking</span>();<br/>
+<br/>
+<span class='code_comment'>// Called by the timer hook, this changes the running process.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>task_switch</span>();<br/>
+<br/>
+<span class='code_comment'>// Forks the current process, spawning a new one with a different</span><br/>
+<span class='code_comment'>// memory space.</span><br/>
+<span class='code_primitive'>int</span>&nbsp;<span class='code_function'>fork</span>();<br/>
+<br/>
+<span class='code_comment'>// Causes the current process' stack to be forcibly moved to a new location.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>move_stack</span>(<span class='code_primitive'>void</span>&nbsp;<span class='code_operator'>*</span>new_stack_start,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;size);<br/>
+<br/>
+<span class='code_comment'>// Returns the pid of the current process.</span><br/>
+<span class='code_primitive'>int</span>&nbsp;<span class='code_function'>getpid</span>();<br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>endif</span><br/>
+</span>
+</div>
+We define a task structure, which contains a task ID (known as a PID), some saved registers, a pointer to a page directory, and the next task in the list (this is a singly linked list).
+</p>
+<p>In task.c, we'll need some global variables, and we have a small initialise_tasking function that just creates one, blank, task.
+</p>
+<p><div class='code'>
+<span class='code_comment'>//</span><br/>
+<span class='code_comment'>// task.c - Implements the functionality needed to multitask.</span><br/>
+<span class='code_comment'>//          Written for JamesM's kernel development tutorials.</span><br/>
+<span class='code_comment'>//</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"task.h"<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"paging.h"<br/>
+</span><br/>
+<span class='code_comment'>// The currently running task.</span><br/>
+volatile&nbsp;<span class='code_typedef'>task_t</span>&nbsp;<span class='code_operator'>*</span>current_task;<br/>
+<br/>
+<span class='code_comment'>// The start of the task linked list.</span><br/>
+volatile&nbsp;<span class='code_typedef'>task_t</span>&nbsp;<span class='code_operator'>*</span>ready_queue;<br/>
+<br/>
+<span class='code_comment'>// Some externs are needed to access members in paging.c...</span><br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>kernel_directory;<br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>current_directory;<br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>alloc_frame</span>(<span class='code_typedef'>page_t</span><span class='code_operator'>*</span>,<span class='code_primitive'>int</span>,<span class='code_primitive'>int</span>);<br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_primitive'>u32int</span>&nbsp;initial_esp;<br/>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>read_eip</span>();<br/>
+<br/>
+<span class='code_comment'>// The next available process ID.</span><br/>
+<span class='code_primitive'>u32int</span>&nbsp;next_pid&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>initialise_tasking</span>()<br/>
+{
+</div>
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;asm&nbsp;volatile("cli");<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;//&nbsp;Relocate&nbsp;the&nbsp;stack&nbsp;so&nbsp;we&nbsp;know&nbsp;where&nbsp;it&nbsp;is.<br/>
+&nbsp;&nbsp;&nbsp;move_stack((void*)0xE0000000,&nbsp;0x2000);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;//&nbsp;Initialise&nbsp;the&nbsp;first&nbsp;task&nbsp;(kernel&nbsp;task)<br/>
+&nbsp;&nbsp;&nbsp;current_task&nbsp;=&nbsp;ready_queue&nbsp;=&nbsp;(task_t*)kmalloc(sizeof(task_t));<br/>
+&nbsp;&nbsp;&nbsp;current_task-&gt;id&nbsp;=&nbsp;next_pid++;<br/>
+&nbsp;&nbsp;&nbsp;current_task-&gt;esp&nbsp;=&nbsp;current_task-&gt;ebp&nbsp;=&nbsp;0;<br/>
+&nbsp;&nbsp;&nbsp;current_task-&gt;eip&nbsp;=&nbsp;0;<br/>
+&nbsp;&nbsp;&nbsp;current_task-&gt;page_directory&nbsp;=&nbsp;current_directory;<br/>
+&nbsp;&nbsp;&nbsp;current_task-&gt;next&nbsp;=&nbsp;0;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;//&nbsp;Reenable&nbsp;interrupts.<br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;volatile("sti");<br/>
+}
+</div>
+</p>
+<p>Right. We only have two more functions to write - fork(), and switch_task(). Fork() is a UNIX function to create a new process. It clones the address space and starts the new process running at the same place as the original process is currently at.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>int</span>&nbsp;<span class='code_function'>fork</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We are modifying kernel structures, and so cannot be interrupted.</span><br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"cli"</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Take a pointer to this process' task struct for later reference.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>task_t</span>&nbsp;<span class='code_operator'>*</span>parent_task&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>task_t</span><span class='code_operator'>*</span>)current_task;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Clone the address space.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>page_directory_t</span>&nbsp;<span class='code_operator'>*</span>directory&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>clone_directory</span>(current_directory);
+</div>
+</p>
+<p>So firstly we disable interrupts, because we're changing kernel structures and could cause problems if we're interrupted half way through. We then clone the current page directory.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Create a new process.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>task_t</span>&nbsp;<span class='code_operator'>*</span>new_task&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>task_t</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc</span>(<span class='code_function'>sizeof</span>(<span class='code_typedef'>task_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;new_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>id&nbsp;<span class='code_operator'>=</span>&nbsp;next_pid<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;new_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>esp&nbsp;<span class='code_operator'>=</span>&nbsp;new_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>ebp&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;new_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>eip&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;new_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>page_directory&nbsp;<span class='code_operator'>=</span>&nbsp;directory;<br/>
+&nbsp;&nbsp;&nbsp;new_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>next&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Add it to the end of the ready queue.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Find the end of the ready queue...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>task_t</span>&nbsp;<span class='code_operator'>*</span>tmp_task&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>task_t</span><span class='code_operator'>*</span>)ready_queue;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(tmp_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>next)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tmp_task&nbsp;<span class='code_operator'>=</span>&nbsp;tmp_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>next;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// ...And extend it.</span><br/>
+&nbsp;&nbsp;&nbsp;tmp_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>next&nbsp;<span class='code_operator'>=</span>&nbsp;new_task;
+</div>
+</p>
+<p>Here we create a new process, just like in <i>initialise_tasking</i>. We add it to the end of the ready queue (the queue of tasks that are ready to run). If you don't understand this code, I suggest you look up a tutorial on working with Singly Linked Lists.
+</p>
+<p>We have to tell the task where it should start executing. For this, we need to read the current instruction pointer. We need a quick read_eip() function to do this - this is in process.s:
+</p>
+<p><div class='code'>
+[<span class='code_primitive'>GLOBAL</span>&nbsp;read_eip]<br/>
+<span class='code_label'>read_eip:</span><br/>
+&nbsp;&nbsp;<span class='code_operator'>pop</span>&nbsp;eax<br/>
+&nbsp;&nbsp;<span class='code_operator'>jmp</span>&nbsp;eax
+</div>
+</p>
+<p>This is a rather clever way of reading the current instruction pointer. When read_eip is called, the current instruction location is pushed onto the stack. Normally, we use "ret" to return from a function. This instruction pops the value from the stack and jumps to it. Here, however, we pop the value ourselves, into EAX (remember that EAX is the 'return value' register for the __cdecl calling convention), then jump to it.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// This will be the entry point for the new process.</span><br/>
+<span class='code_primitive'>u32int</span>&nbsp;eip&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>read_eip</span>();
+</div>
+</p>
+<p>Important to note is that because (later) we set the new task's starting address to "eip", after the call to read_eip we could be in one of two states.
+</p>
+<p><ol>
+<li>We just called read_eip, and are the parent task.</li>
+<li>We are the child task, and just started executing.</li>
+</ol>
+</p>
+<p>To try and distinguish between the two cases, we check if "current_task == parent_task". In switch_task(), we will add code which updates "current_task" to always point to the currently running task. So, if we are the child task, current_task will not be the same as parent_task, else, it will.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We could be the parent or the child here - check.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(current_task&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;parent_task)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We are the parent, so set up the esp/ebp/eip for our child.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;esp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%%esp,&nbsp;%0"</span>&nbsp;:&nbsp;<span class='code_string'>"=r"</span>(esp));<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;ebp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%%ebp,&nbsp;%0"</span>&nbsp;:&nbsp;<span class='code_string'>"=r"</span>(ebp));<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;new_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>esp&nbsp;<span class='code_operator'>=</span>&nbsp;esp;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;new_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>ebp&nbsp;<span class='code_operator'>=</span>&nbsp;ebp;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;new_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>eip&nbsp;<span class='code_operator'>=</span>&nbsp;eip;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// All finished: Reenable interrupts.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"sti"</span>);
+</div>
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;new_task-&gt;id;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;else<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;//&nbsp;We&nbsp;are&nbsp;the&nbsp;child&nbsp;-&nbsp;by&nbsp;convention&nbsp;return&nbsp;0.<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;0;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+}
+</div>
+</p>
+<p>Let's just run through that code. If we are the parent task, we read the current stack pointer and base pointer values and store them into the new task's task_struct. We also store the instruction pointer we found earlier in there, and reenable interrupts (because we've finished). Fork(), by convention, returns the PID of the child task if we are the parent, or zero if we are the child.
+</p>
+<p></p><h3>9.4.1. Switching tasks</h3>
+<p>Firstly we need to get the timer callback to call our scheduling function.
+</p>
+<p><i>In timer.c</i>
+<div class='code'>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>timer_callback</span>(<span class='code_typedef'>registers_t</span>&nbsp;regs)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;tick<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>switch_task</span>();<br/>
+}
+</div>
+</p>
+<p>Now we just need to write it! ;)
+</p>
+<p><div class='code'>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>switch_task</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If we haven't initialised tasking yet, just return.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(<span class='code_operator'>!</span>current_task)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>;
+</div>
+</p>
+<p>Because this function will be called whenever the timer fires, it is very possible that it will be called before <i>initialise_tasking</i> has been called. So we check that here - if the current task is NULL, we haven't set up tasking yet, so just return.
+</p>
+<p>Next, lets just quickly grab the stack and base pointers - we'll need them in a minute.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Read esp, ebp now for saving later on.</span><br/>
+<span class='code_primitive'>u32int</span>&nbsp;esp,&nbsp;ebp,&nbsp;eip;<br/>
+asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%%esp,&nbsp;%0"</span>&nbsp;:&nbsp;<span class='code_string'>"=r"</span>(esp));<br/>
+asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"mov&nbsp;%%ebp,&nbsp;%0"</span>&nbsp;:&nbsp;<span class='code_string'>"=r"</span>(ebp));
+</div>
+</p>
+<p>Now it's time for some cunning logic. <i>Make sure you understand this piece of code. It's very important</i>. We read the instruction pointer, using our read_eip function again. We'll put this value into the current task's "eip" field, so the next time it is scheduled, it picks up again at exactly the same location. However, just like in fork(), after the call we could be in one of two states:
+</p>
+<p><ol>
+<li>We just called read_eip, and it returned us the current instruction pointer.</li>
+<li>We just switched tasks, and execution started just after the read_eip function.</li>
+</ol>
+</p>
+<p>How do we distinguish between the two? Well, we can cheat. When we actually do the assembly to switch tasks (in a minute), we can plant a dummy value (I've used 0x12345) into EAX. Because C uses EAX as the return value of a function, in the second case the return value of read_eip will <i>seem</i> to be 0x12345! So we can use that to distinguish between them.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Read the instruction pointer. We do some cunning logic here:</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// One of two things could have happened when this function exits -</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>//   (a) We called the function and it returned the EIP as requested.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>//   (b) We have just switched tasks, and because the saved EIP is essentially</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>//       the instruction after read_eip(), it will seem as if read_eip has just</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>//       returned.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// In the second case we need to return immediately. To detect it we put a dummy</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// value in EAX further down at the end of this function. As C returns values in EAX,</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// it will look like the return value is this dummy value! (0x12345).</span><br/>
+&nbsp;&nbsp;&nbsp;eip&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>read_eip</span>();<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Have we just switched tasks?</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(eip&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x12345)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>;
+</div>
+</p>
+<p>Next, we write the new ESP, EBP and EIP into the current task's task struct.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// No, we didn't switch tasks. Let's save some register values and switch.</span><br/>
+&nbsp;&nbsp;&nbsp;current_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>eip&nbsp;<span class='code_operator'>=</span>&nbsp;eip;<br/>
+&nbsp;&nbsp;&nbsp;current_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>esp&nbsp;<span class='code_operator'>=</span>&nbsp;esp;<br/>
+&nbsp;&nbsp;&nbsp;current_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>ebp&nbsp;<span class='code_operator'>=</span>&nbsp;ebp;
+</div>
+</p>
+<p>Then, we switch tasks! Advance through the current_task listed list. If we fall off the end (if current_task ends up being zero, we just start again).
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Get the next task to run.</span><br/>
+&nbsp;&nbsp;&nbsp;current_task&nbsp;<span class='code_operator'>=</span>&nbsp;current_task<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>next;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If we fell off the end of the linked list start again at the beginning.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(<span class='code_operator'>!</span>current_task)&nbsp;current_task&nbsp;<span class='code_operator'>=</span>&nbsp;ready_queue;
+</div>
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;esp&nbsp;=&nbsp;current_task-&gt;esp;<br/>
+&nbsp;&nbsp;&nbsp;ebp&nbsp;=&nbsp;current_task-&gt;ebp;
+</div>
+</p>
+<p>The last three lines are just to make the assembly that follows a bit easier to understand.
+</p>
+<p>The comments in this function really should explain everything. We change all the registers we need, then jump to the new instruction location.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Here we:</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// * Stop interrupts so we don't get interrupted.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// * Temporarily put the new EIP location in ECX.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// * Load the stack and base pointers from the new task struct.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// * Change page directory to the physical address (physicalAddr) of the new directory.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// * Put a dummy value (0x12345) in EAX so that above we can recognise that we've just</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>//   switched task.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// * Restart interrupts. The STI instruction has a delay - it doesn't take effect until after</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>//   the next instruction.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// * Jump to the location in ECX (remember we put the new EIP in there).</span><br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cli;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;%0,&nbsp;%%ecx;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;%1,&nbsp;%%esp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;%2,&nbsp;%%ebp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;%3,&nbsp;%%cr3;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;$0x12345,&nbsp;%%eax;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sti;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\
+<br />&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;jmp&nbsp;*%%ecx&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;:&nbsp;<span class='code_string'>"r"</span>(eip),&nbsp;<span class='code_string'>"r"</span>(esp),&nbsp;<span class='code_string'>"r"</span>(ebp),&nbsp;<span class='code_string'>"r"</span>(current_directory<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>physicalAddr));<br/>
+}
+</div>
+</p>
+<p>Sorted! That's us finished! Let's test it out!
+</p>
+<p></p><h2>9.5. Testing</h2>
+<p>Let's change our main() function:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>int</span>&nbsp;<span class='code_function'>main</span>(<span class='code_primitive'>struct</span>&nbsp;multiboot&nbsp;<span class='code_operator'>*</span>mboot_ptr,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;initial_stack)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;initial_esp&nbsp;<span class='code_operator'>=</span>&nbsp;initial_stack;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise all the ISRs and segmentation</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>init_descriptor_tables</span>();<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the screen (by clearing it)</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_clear</span>();<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the PIT to 100Hz</span><br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"sti"</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>init_timer</span>(<span class='code_integer'>50</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Find the location of our initial ramdisk.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(mboot_ptr<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>mods_count&nbsp;<span class='code_operator'>&gt;</span>&nbsp;<span class='code_integer'>0</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;initrd_location&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>*</span>((<span class='code_primitive'>u32int</span><span class='code_operator'>*</span>)mboot_ptr<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>mods_addr);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;initrd_end&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>*</span>(<span class='code_primitive'>u32int</span><span class='code_operator'>*</span>)(mboot_ptr<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>mods_addr<span class='code_operator'>+</span><span class='code_integer'>4</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Don't trample our module with placement accesses, please!</span><br/>
+&nbsp;&nbsp;&nbsp;placement_address&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_end;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Start paging.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>initialise_paging</span>();<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Start multitasking.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>initialise_tasking</span>();<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the initial ramdisk, and set it as the filesystem root.</span><br/>
+&nbsp;&nbsp;&nbsp;fs_root&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>initialise_initrd</span>(initrd_location);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Create a new process in a new address space which is a clone of this.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;ret&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>fork</span>();<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"fork()&nbsp;returned&nbsp;"</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write_hex</span>(ret);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>",&nbsp;and&nbsp;getpid()&nbsp;returned&nbsp;"</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write_hex</span>(<span class='code_function'>getpid</span>());<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\n</span>============================================================================<span class='code_character'>\n</span>"</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The next section of code is not reentrant so make sure we aren't interrupted during.</span><br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"cli"</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// list the contents of /</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>struct</span>&nbsp;dirent&nbsp;<span class='code_operator'>*</span>node&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(&nbsp;(node&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>readdir_fs</span>(fs_root,&nbsp;i))&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"Found&nbsp;file&nbsp;"</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(node<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>name);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>fsnode&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>finddir_fs</span>(fs_root,&nbsp;node<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>name);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;((fsnode<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>flags<span class='code_operator'>&</span><span class='code_integer'>0</span>x7)&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;FS_DIRECTORY)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\n</span><span class='code_character'>\t</span>(directory)<span class='code_character'>\n</span>"</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\n</span><span class='code_character'>\t</span>&nbsp;contents:&nbsp;<span class='code_character'>\"</span>"</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>char</span>&nbsp;buf[<span class='code_integer'>256</span>];<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;sz&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>read_fs</span>(fsnode,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>256</span>,&nbsp;buf);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;j;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(j&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;j&nbsp;<span class='code_operator'>&lt;</span>&nbsp;sz;&nbsp;j<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_put</span>(buf[j]);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\"</span><span class='code_character'>\n</span>"</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\n</span>"</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"sti"</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+}
+</div>
+</p>
+<p></p><h2>9.6. Summary</h2>
+<p><div class='image_frame'><img src='images/multitasking_bochs.png' /><br/><span class='image_caption'>Success!</span></div>
+Multitasking is really one of the final hurdles to creating a "proper" kernel. Giving the user the appearance of being able to run multiple things concurrently is essential to any modern OS.
+</p>
+<p>Full source code is available <a href='/downloads/multitasking.tar.gz'>here</a>.
+</p></div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+</body></html>

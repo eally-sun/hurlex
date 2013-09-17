@@ -1,0 +1,29 @@
+#
+# Bochs 配置文件
+#
+# 201307/24
+#
+
+# 内存
+megs: 32
+
+# ROM file
+romimage: file="$BXSHARE/BIOS-bochs-latest"
+vgaromimage: file="$BXSHARE/VGABIOS-lgpl-latest"
+
+# 软盘
+floppya: 1_44=floppy.img, status=inserted
+boot: a
+
+# 启动设备
+boot: floppy
+
+# 鼠标 不启用
+mouse: enabled=0
+
+# 键盘 启用 US 键盘映射
+keyboard_mapping: enabled=1, map="$BXSHARE/keymaps/x11-pc-us.map"
+
+# CPU
+clock: sync=realtime
+cpu: ips=500000

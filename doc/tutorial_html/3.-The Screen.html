@@ -1,0 +1,373 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><title>3.-The Screen</title><link rel='stylesheet' type='text/css' href='css/highlight.css'><link rel='stylesheet' type='text/css' href='css/layout.css'></head><body><div class="header">
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="index.html">Home</a> &raquo;
+	 	JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+
+<div class='index'>
+<a href='1.-Environment setup.html'>1. Environment setup</a><br/><a href='2.-Genesis.html'>2. Genesis</a><br/><a href='3.-The Screen.html' class='selected' >3. The Screen</a><br/><a href='4.-The GDT and IDT.html'>4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html'>5. IRQs and the PIT</a><br/><a href='6.-Paging.html'>6. Paging</a><br/><a href='7.-The Heap.html'>7. The Heap</a><br/><a href='8.-The VFS and the initrd.html'>8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html'>9. Multitasking</a><br/><a href='10.-User Mode.html'>10. User Mode</a><br/></div>
+<h1>3. The Screen</h1>
+<p>So, now that we have a 'kernel' that can run and stick itself into an
+infinite loop, it's time to get something interesting appearing on the
+screen. Along with serial I/O, the monitor will be your most important
+ally in the debugging battle.
+</p>
+<p></p><h2>3.1. The theory</h2>
+<p>Your kernel gets booted by GRUB in text mode. That is, it has
+available to it a framebuffer (area of memory) that controls a screen
+of characters (not pixels) 80 wide by 25 high. This will be the mode
+your kernel will operate in until your get into the world of VESA
+(which will not be covered in this tutorial).
+</p>
+<p>The area of memory known as the framebuffer is accessible just like
+normal RAM, at address <i>0xB8000</i>. It is important to note, however,
+that it is <i>not</i> actually normal RAM. It is part of the VGA
+controller's dedicated video memory that has been memory-mapped via
+hardware into your linear address space. This is an important
+distinction.
+</p>
+<p>The framebuffer is just an array of 16-bit words, each 16-bit value
+representing the display of one character. The offset from the start
+of the framebuffer of the word that specifies a character at position
+<i>x</i>, <i>y</i> is:
+</p>
+<p><div class='code'>
+(y&nbsp;*&nbsp;80&nbsp;+&nbsp;x)&nbsp;*&nbsp;2
+</div>
+</p>
+<p>What's important to note is that the '* 2' is there only because each
+element is 2 bytes (16 bits) long. If you're indexing an array of
+16-bit values, for example, your index would just be y*80+x.
+</p>
+<p><div class='image_frame'><img src='images/the_screen_word_format.png' /><br/><span class='image_caption'>Word format</span></div>
+In ASCII (unicode is not supported in text mode), 8 bits are used to
+represent a character. That gives us 8 more bits which are unused. The
+VGA hardware uses these to designate foreground and background
+colours (4 bits each). The splitting of this 16-bit value is shown in
+the diagram to the right. 
+</p>
+<p>4 bits for a colour code gives us 15 possible colours we can display:
+</p>
+<p>0:black, 1:blue, 2:green, 3:cyan, 4:red, 5:magenta, 6:brown, 7:light
+grey, 8:dark grey, 9:light blue, 10:light green, 11:light cyan,
+12:light red, 13:light magneta, 14: light brown, 15: white.
+</p>
+<p>The VGA controller also has some ports on the main I/O bus, which you
+can use to send it specific instructions. (Among others) it has a
+control register at 0x3D4 and a data register at 0x3D5. We will use
+these to instruct the controller to update it's cursor position (the
+flashy underbar thing that tells you where your next character will
+go).
+</p>
+<p></p><h2>3.2. The practice</h2>
+<p></p><h3>3.2.1. First things first</h3>
+<p>Firstly, we need a few more commonly-used global functions. common.c
+and common.h include functions for writing to and reading from the I/O
+bus, and some typedefs that will make it easier for us to write
+portable code. They are also the ideal place to put functions such as
+memcpy/memset etc. I have left them for you to implement! :)
+</p>
+<p><div class='code'>
+<span class='code_comment'>// common.h -- Defines typedefs and some global functions.</span><br/>
+<span class='code_comment'>//             From JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>ifndef</span>&nbsp;COMMON_H<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;COMMON_H<br/>
+</span><br/>
+<span class='code_comment'>// Some nice typedefs, to standardise sizes across platforms.</span><br/>
+<span class='code_comment'>// These typedefs are written for 32-bit X86.</span><br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>int</span>&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>;<br/>
+<span class='code_primitive'>typedef</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;&nbsp;&nbsp;<span class='code_primitive'>s32int</span>;<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>short</span>&nbsp;<span class='code_primitive'>u16int</span>;<br/>
+<span class='code_primitive'>typedef</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>short</span>&nbsp;<span class='code_primitive'>s16int</span>;<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>char</span>&nbsp;&nbsp;<span class='code_primitive'>u8int</span>;<br/>
+<span class='code_primitive'>typedef</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>char</span>&nbsp;&nbsp;<span class='code_primitive'>s8int</span>;<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>outb</span>(<span class='code_primitive'>u16int</span>&nbsp;port,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;value);<br/>
+<span class='code_primitive'>u8int</span>&nbsp;<span class='code_function'>inb</span>(<span class='code_primitive'>u16int</span>&nbsp;port);<br/>
+<span class='code_primitive'>u16int</span>&nbsp;<span class='code_function'>inw</span>(<span class='code_primitive'>u16int</span>&nbsp;port);<br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>endif</span><br/>
+</span>
+</div>
+</p>
+<p><div class='code'>
+<span class='code_comment'>// common.c -- Defines some global functions.</span><br/>
+<span class='code_comment'>//             From JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><br/>
+<span class='code_comment'>// Write a byte out to the specified port.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>outb</span>(<span class='code_primitive'>u16int</span>&nbsp;port,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;value)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;asm&nbsp;volatile&nbsp;(<span class='code_string'>"outb&nbsp;%1,&nbsp;%0"</span>&nbsp;:&nbsp;:&nbsp;<span class='code_string'>"dN"</span>&nbsp;(port),&nbsp;<span class='code_string'>"a"</span>&nbsp;(value));<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>u8int</span>&nbsp;<span class='code_function'>inb</span>(<span class='code_primitive'>u16int</span>&nbsp;port)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;ret;<br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;<span class='code_function'>volatile</span>(<span class='code_string'>"inb&nbsp;%1,&nbsp;%0"</span>&nbsp;:&nbsp;<span class='code_string'>"=a"</span>&nbsp;(ret)&nbsp;:&nbsp;<span class='code_string'>"dN"</span>&nbsp;(port));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;ret;<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>u16int</span>&nbsp;<span class='code_function'>inw</span>(<span class='code_primitive'>u16int</span>&nbsp;port)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;ret;<br/>
+&nbsp;&nbsp;&nbsp;asm&nbsp;volatile&nbsp;(<span class='code_string'>"inw&nbsp;%1,&nbsp;%0"</span>&nbsp;:&nbsp;<span class='code_string'>"=a"</span>&nbsp;(ret)&nbsp;:&nbsp;<span class='code_string'>"dN"</span>&nbsp;(port));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;ret;<br/>
+}
+</div>
+</p>
+<p></p><h3>3.2.2. The monitor code</h3>
+<p>A simple header file:
+</p>
+<p><div class='code'>
+<span class='code_comment'>// monitor.h -- Defines the interface for monitor.h</span><br/>
+<span class='code_comment'>//              From JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>ifndef</span>&nbsp;MONITOR_H<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MONITOR_H<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><br/>
+<span class='code_comment'>// Write a single character out to the screen.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>monitor_put</span>(<span class='code_primitive'>char</span>&nbsp;c);<br/>
+<br/>
+<span class='code_comment'>// Clear the screen to all black.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>monitor_clear</span>();<br/>
+<br/>
+<span class='code_comment'>// Output a null-terminated ASCII string to the monitor.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span>c);<br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>endif</span>&nbsp;//&nbsp;MONITOR_H<br/>
+</span>
+</div>
+</p>
+<p></p><h4>3.2.2.1. Moving the cursor</h4>
+<p>To move the hardware cursor, we must firstly work out the linear
+offset of the x,y cursor coordinate. We do this by using the equation
+above. Next, we have to send this offset to the VGA controller. For
+some reason, it accepts the 16-bit location as two bytes. We send the
+controller's command port (0x3D4) the command 14 to tell it we are
+sending the high byte, then send that byte to port 0x3D5. We then
+repeat with the low byte, but send the command 15 instead.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Updates the hardware cursor.</span><br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>move_cursor</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The screen is 80 characters wide...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;cursorLocation&nbsp;<span class='code_operator'>=</span>&nbsp;cursor_y&nbsp;<span class='code_operator'>*</span>&nbsp;<span class='code_integer'>80</span>&nbsp;<span class='code_operator'>+</span>&nbsp;cursor_x;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x3D4,&nbsp;<span class='code_integer'>14</span>);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Tell the VGA board we are setting the high cursor byte.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x3D5,&nbsp;cursorLocation&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>&gt;</span>&nbsp;<span class='code_integer'>8</span>);&nbsp;<span class='code_comment'>// Send the high cursor byte.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x3D4,&nbsp;<span class='code_integer'>15</span>);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Tell the VGA board we are setting the low cursor byte.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x3D5,&nbsp;cursorLocation);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Send the low cursor byte.</span><br/>
+}
+</div>
+</p>
+<p></p><h4>3.2.2.2. Scrolling the screen</h4>
+<p>At some point we're going to fill up the screen with text. It would be
+nice if, when we do that, the screen acted like a terminal and
+scrolled up one line. Actually, this really isn't very difficult to
+do:
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Scrolls the text on the screen up by one line.</span><br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>scroll</span>()<br/>
+{<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Get a space character with the default colour attributes.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;attributeByte&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_integer'>0</span>&nbsp;<span class='code_comment'>/*black*/</span>&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>4</span>)&nbsp;<span class='code_operator'>|</span>&nbsp;(<span class='code_integer'>15</span>&nbsp;<span class='code_comment'>/*white*/</span>&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>x0F);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;blank&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x20&nbsp;<span class='code_comment'>/*&nbsp;space&nbsp;*/</span>&nbsp;<span class='code_operator'>|</span>&nbsp;(attributeByte&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>8</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Row 25 is the end, this means we need to scroll up</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>(cursor_y&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>25</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Move the current text chunk that makes up the screen</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// back in the buffer by a line</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span><span class='code_operator'>*</span><span class='code_integer'>80</span>;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>24</span><span class='code_operator'>*</span><span class='code_integer'>80</span>;&nbsp;i<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;video_memory[i]&nbsp;<span class='code_operator'>=</span>&nbsp;video_memory[i<span class='code_operator'>+</span><span class='code_integer'>80</span>];<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The last line should now be blank. Do this by writing</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// 80 spaces to it.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>24</span><span class='code_operator'>*</span><span class='code_integer'>80</span>;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>25</span><span class='code_operator'>*</span><span class='code_integer'>80</span>;&nbsp;i<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;video_memory[i]&nbsp;<span class='code_operator'>=</span>&nbsp;blank;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The cursor should now be on the last line.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cursor_y&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>24</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+}
+</div>
+</p>
+<p></p><h4>3.2.2.3. Writing a character to the screen</h4>
+<p>Now the code gets a little more complex. But, if you look at it,
+you'll see that most of it is logic as to where to put the cursor next
+- there really isn't much difficult there.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Writes a single character out to the screen.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>monitor_put</span>(<span class='code_primitive'>char</span>&nbsp;c)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The background colour is black (0), the foreground is white (15).</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;backColour&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;foreColour&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>15</span>;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The attribute byte is made up of two nibbles - the lower being the</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// foreground colour, and the upper the background colour.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;&nbsp;attributeByte&nbsp;<span class='code_operator'>=</span>&nbsp;(backColour&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>4</span>)&nbsp;<span class='code_operator'>|</span>&nbsp;(foreColour&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>x0F);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The attribute byte is the top 8 bits of the word we have to send to the</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// VGA board.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;attribute&nbsp;<span class='code_operator'>=</span>&nbsp;attributeByte&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>8</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;<span class='code_operator'>*</span>location;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Handle a backspace, by moving the cursor back one space</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(c&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x08&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span>&nbsp;cursor_x)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cursor_x<span class='code_operator'>--</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Handle a tab by increasing the cursor's X, but only to a point</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// where it is divisible by 8.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span>&nbsp;<span class='code_primitive'>if</span>&nbsp;(c&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x09)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cursor_x&nbsp;<span class='code_operator'>=</span>&nbsp;(cursor_x<span class='code_operator'>+</span><span class='code_integer'>8</span>)&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_operator'>~</span>(<span class='code_integer'>8</span><span class='code_operator'>-</span><span class='code_integer'>1</span>);<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Handle carriage return</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span>&nbsp;<span class='code_primitive'>if</span>&nbsp;(c&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_character'>'\r'</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cursor_x&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Handle newline by moving cursor back to left and increasing the row</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span>&nbsp;<span class='code_primitive'>if</span>&nbsp;(c&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_character'>'\n'</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cursor_x&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cursor_y<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Handle any other printable character.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>else</span>&nbsp;<span class='code_primitive'>if</span>(c&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>=</span>&nbsp;<span class='code_character'>' '</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;location&nbsp;<span class='code_operator'>=</span>&nbsp;video_memory&nbsp;<span class='code_operator'>+</span>&nbsp;(cursor_y<span class='code_operator'>*</span><span class='code_integer'>80</span>&nbsp;<span class='code_operator'>+</span>&nbsp;cursor_x);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>*</span>location&nbsp;<span class='code_operator'>=</span>&nbsp;c&nbsp;<span class='code_operator'>|</span>&nbsp;attribute;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cursor_x<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Check if we need to insert a new line because we have reached the end</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// of the screen.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(cursor_x&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>80</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cursor_x&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cursor_y&nbsp;<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Scroll the screen if needed.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>scroll</span>();<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Move the hardware cursor.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>move_cursor</span>();<br/>
+}
+</div>
+</p>
+<p>See? It's pretty simple!
+The bit that actually does the writing is here:
+</p>
+<p><div class='code'>
+location&nbsp;<span class='code_operator'>=</span>&nbsp;video_memory&nbsp;<span class='code_operator'>+</span>&nbsp;(cursor_y<span class='code_operator'>*</span><span class='code_integer'>80</span>&nbsp;<span class='code_operator'>+</span>&nbsp;cursor_x);<br/>
+<span class='code_operator'>*</span>location&nbsp;<span class='code_operator'>=</span>&nbsp;c&nbsp;<span class='code_operator'>|</span>&nbsp;attribute;
+</div>
+</p>
+<p><ul>
+<li>Set 'location' to point to the linear address of the word corresponding to the current cursor position (see equation above).</li>
+<li>Set the value at 'location' to be the logical-OR of the character and 'attribute'. Remember that we shifted 'attribute' left 8 bits above, so actually we're just setting 'c' as the lower byte of 'attribute'.</li>
+</ul>
+</p>
+<p></p><h4>3.2.2.4. Clearing the screen</h4>
+<p>Clearing the screen is also dead easy. Just fill it with loads of
+spaces:
+</p>
+<p><div class='code'>
+<span class='code_comment'>// Clears the screen, by copying lots of spaces to the framebuffer.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>monitor_clear</span>()<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Make an attribute byte for the default colours</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;attributeByte&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_integer'>0</span>&nbsp;<span class='code_comment'>/*black*/</span>&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>4</span>)&nbsp;<span class='code_operator'>|</span>&nbsp;(<span class='code_integer'>15</span>&nbsp;<span class='code_comment'>/*white*/</span>&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>x0F);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u16int</span>&nbsp;blank&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>x20&nbsp;<span class='code_comment'>/*&nbsp;space&nbsp;*/</span>&nbsp;<span class='code_operator'>|</span>&nbsp;(attributeByte&nbsp;<span class='code_operator'>&lt;</span><span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>8</span>);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;<span class='code_integer'>80</span><span class='code_operator'>*</span><span class='code_integer'>25</span>;&nbsp;i<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;video_memory[i]&nbsp;<span class='code_operator'>=</span>&nbsp;blank;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Move the hardware cursor back to the start.</span><br/>
+&nbsp;&nbsp;&nbsp;cursor_x&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;cursor_y&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>move_cursor</span>();<br/>
+}
+</div>
+</p>
+<p></p><h4>3.2.2.5. Writing a string</h4>
+<p><div class='code'>
+<span class='code_comment'>// Outputs a null-terminated ASCII string to the monitor.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span>c)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>while</span>&nbsp;(c[i])<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_put</span>(c[i<span class='code_operator'>++</span>]);<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+}
+</div>
+</p>
+<p></p><h2>3.3. Summary</h2>
+<p>If you put all that code together, you can add a couple of lines to
+your main.c file:
+</p>
+<p><div class='code'>
+<span class='code_function'>monitor_clear</span>();<br/>
+<span class='code_function'>monitor_write</span>(<span class='code_string'>"Hello,&nbsp;world!"</span>);
+</div>
+</p>
+<p>Et voila - a text output function! Not bad for a couple of minutes'
+work, eh?
+</p>
+<p></p><h2>3.4. Extensions</h2>
+<p>Apart from implementing memcpy/memset/strlen/strcmp etc, there are a
+few other functions that will make life easier for you.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>monitor_write_hex</span>(<span class='code_primitive'>u32int</span>&nbsp;n)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// TODO: implement this yourself!</span><br/>
+}<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>monitor_write_dec</span>(<span class='code_primitive'>u32int</span>&nbsp;n)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// TODO: implement this yourself!</span><br/>
+}
+</div>
+</p>
+<p>The function names should be pretty self explanatory -- writing in
+hexadecimal really is required if you're going to check the validity
+of pointers. Decimal is optional but it's nice to see something in
+base 10 every once in a while!
+</p>
+<p><div class='image_frame'><img src='images/the_screen_screenshot.png' /><br/><span class='image_caption'>Hello, world!</span></div>
+You could also have a scout at the linux0.1 code - that has an
+implementation of vsprintf which is quite neat and tidy. You could
+copy that function then use it to implement printf(), which will make
+your life a hell of a lot easier when it comes to debugging.
+</p>
+<p>Source code for this tutorial is available
+<a href='/downloads/the_screen.tar.gz'>here</a>
+</p></div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+</body></html>

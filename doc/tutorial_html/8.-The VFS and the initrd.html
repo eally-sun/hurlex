@@ -1,0 +1,571 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><title>8.-The VFS and the initrd</title><link rel='stylesheet' type='text/css' href='css/highlight.css'><link rel='stylesheet' type='text/css' href='css/layout.css'></head><body><div class="header">
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="index.html">Home</a> &raquo;
+	 	JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+
+<div class='index'>
+<a href='1.-Environment setup.html'>1. Environment setup</a><br/><a href='2.-Genesis.html'>2. Genesis</a><br/><a href='3.-The Screen.html'>3. The Screen</a><br/><a href='4.-The GDT and IDT.html'>4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html'>5. IRQs and the PIT</a><br/><a href='6.-Paging.html'>6. Paging</a><br/><a href='7.-The Heap.html'>7. The Heap</a><br/><a href='8.-The VFS and the initrd.html' class='selected' >8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html'>9. Multitasking</a><br/><a href='10.-User Mode.html'>10. User Mode</a><br/></div>
+<h1>8. The VFS and the initrd</h1>
+<p>In this chapter we're going to be starting work on our virtual filesystem (VFS). As a baptism of fire, we will also be implementing an initial ramdisk so you can load configuration files or executables to your kernel.
+</p>
+<p></p><h2>8.1. The virtual filesystem</h2>
+<p><div class='image_frame'><img src='images/vfs.png' /><br/><span class='image_caption'>Graph of nodes.</span></div>A VFS is intended to abstract away details of the filesystem and location that files are stored, and to give access to them in a uniform manner. They are usually implemented as a graph of nodes; Each node representing either a file, directory, symbolic link, device, socket or pipe. Each node should know what filesystem it belongs to and have enough information such that the relavent open/close/etc functions in its driver can be found and executed. A common way to accomplish this is to have the node store function pointers which can be called by the kernel. We'll need a few function pointers:
+</p>
+<p><ul>
+<li><i>Open</i> - Called when a node is opened as a file descriptor.</li>
+<li><i>Close</i> - Called when the node is closed.</li>
+<li><i>Read</i> - I should hope this was self explanatory!</li>
+<li><i>Write</i> - Same as above :-)</li>
+<li><i>Readdir</i> - If the current node is a directory, we need a way of enumerating it's contents. Readdir should return the n'th child node of a directory or NULL otherwise. It returns a 'struct dirent', which is compatible with the UNIX readdir function.</li>
+<li><i>Finddir</i> - We also need a way of finding a child node, given a name in string form. This will be used when following absolute pathnames.</li>
+</ul>
+</p>
+<p>So far then our node structure looks something like:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;fs_node<br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_primitive'>char</span>&nbsp;name[<span class='code_integer'>128</span>];&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The filename.</span><br/>
+&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;flags;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Includes the node type (Directory, file etc).</span><br/>
+&nbsp;&nbsp;<span class='code_typedef'>read_type_t</span>&nbsp;read;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// These typedefs are just function pointers. We'll define them later!</span><br/>
+&nbsp;&nbsp;<span class='code_typedef'>write_type_t</span>&nbsp;write;<br/>
+&nbsp;&nbsp;<span class='code_typedef'>open_type_t</span>&nbsp;open;<br/>
+&nbsp;&nbsp;<span class='code_typedef'>close_type_t</span>&nbsp;close;<br/>
+&nbsp;&nbsp;<span class='code_typedef'>readdir_type_t</span>&nbsp;readdir;&nbsp;<span class='code_comment'>// Returns the n'th child of a directory.</span><br/>
+&nbsp;&nbsp;<span class='code_typedef'>finddir_type_t</span>&nbsp;finddir;&nbsp;<span class='code_comment'>// Try to find a child in a directory by name.</span><br/>
+}&nbsp;<span class='code_typedef'>fs_node_t</span>;
+</div>
+</p>
+<p>Obviously we need to store the filename, and flags contains the type of the node (directory, symlink etc), but we are still missing things. We need to know what permissions the file has, which user/group it belongs to, and possibly also its length.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;fs_node<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>char</span>&nbsp;name[<span class='code_integer'>128</span>];&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The filename.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;mask;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The permissions mask.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;uid;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The owning user.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;gid;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The owning group.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;flags;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Includes the node type.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;length;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Size of the file, in bytes.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>read_type_t</span>&nbsp;read;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>write_type_t</span>&nbsp;write;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>open_type_t</span>&nbsp;open;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>close_type_t</span>&nbsp;close;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>readdir_type_t</span>&nbsp;readdir;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>finddir_type_t</span>&nbsp;finddir;<br/>
+}&nbsp;<span class='code_typedef'>fs_node_t</span>;
+</div>
+</p>
+<p>Again though, we are still missing things! We need a way for the filesystem driver to track which node is which. This is commonly known as an <i>inode</i>. It is just a number assigned by the driver which uniquely represents this file. Not only that, but we may have <i>multiple instances of the same filesystem type</i>, so we must also have a variable that the driver can set to track which filesystem instance it belongs to.
+</p>
+<p>Lastly we also need to account for symbolic links (shortcuts in Windows-speak). These are merely pointers or placeholders for other files, and so need a pointer member variable.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;fs_node<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>char</span>&nbsp;name[<span class='code_integer'>128</span>];&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The filename.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;mask;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The permissions mask.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;uid;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The owning user.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;gid;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The owning group.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;flags;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Includes the node type. See #defines above.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;inode;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// This is device-specific - provides a way for a filesystem to identify files.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;length;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Size of the file, in bytes.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;impl;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// An implementation-defined number.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>read_type_t</span>&nbsp;read;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>write_type_t</span>&nbsp;write;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>open_type_t</span>&nbsp;open;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>close_type_t</span>&nbsp;close;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>readdir_type_t</span>&nbsp;readdir;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>finddir_type_t</span>&nbsp;finddir;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>struct</span>&nbsp;fs_node&nbsp;<span class='code_operator'>*</span>ptr;&nbsp;<span class='code_comment'>// Used by mountpoints and symlinks.</span><br/>
+}&nbsp;<span class='code_typedef'>fs_node_t</span>;
+</div>
+</p>
+<p></p><h3>8.1.1. Mountpoints</h3>
+<p><div class='image_frame'><img src='images/vfs_mountpoint.png' /><br/><span class='image_caption'>devfs mounted on /dev</span></div>Mountpoints are the UNIX way of accessing different filesystems. A filesystem is mounted on a directory - any subsequent access to that directory will actually access the root directory of the new filesystem. So essentially the directory is told that it is a mountpoint and given a pointer to the root node of the new filesystem. We can actually reuse the <i>ptr</i> member of fs_node_t for this purpose (as it is currently only used for symlinks and they can never be mountpoints).
+</p>
+<p></p><h3>8.1.2. Implementation</h3>
+<p></p><h4>8.1.2.1. fs.h</h4>
+<p>We first need to define the prototypes for our read/write/etc functions. The first four can be gained by looking at the <a href='http://www.opengroup.org/onlinepubs/009695399/toc.htm'>POSIX specification</a>. The other two can just be made up :-)
+</p>
+<p><div class='code'>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>u32int</span>&nbsp;(<span class='code_operator'>*</span><span class='code_typedef'>read_type_t</span>)(<span class='code_primitive'>struct</span>&nbsp;fs_node<span class='code_operator'>*</span>,<span class='code_primitive'>u32int</span>,<span class='code_primitive'>u32int</span>,<span class='code_primitive'>u8int</span><span class='code_operator'>*</span>);<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>u32int</span>&nbsp;(<span class='code_operator'>*</span><span class='code_typedef'>write_type_t</span>)(<span class='code_primitive'>struct</span>&nbsp;fs_node<span class='code_operator'>*</span>,<span class='code_primitive'>u32int</span>,<span class='code_primitive'>u32int</span>,<span class='code_primitive'>u8int</span><span class='code_operator'>*</span>);<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;(<span class='code_operator'>*</span><span class='code_typedef'>open_type_t</span>)(<span class='code_primitive'>struct</span>&nbsp;fs_node<span class='code_operator'>*</span>);<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;(<span class='code_operator'>*</span><span class='code_typedef'>close_type_t</span>)(<span class='code_primitive'>struct</span>&nbsp;fs_node<span class='code_operator'>*</span>);<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;dirent&nbsp;<span class='code_operator'>*</span>&nbsp;(<span class='code_operator'>*</span><span class='code_typedef'>readdir_type_t</span>)(<span class='code_primitive'>struct</span>&nbsp;fs_node<span class='code_operator'>*</span>,<span class='code_primitive'>u32int</span>);<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;fs_node&nbsp;<span class='code_operator'>*</span>&nbsp;(<span class='code_operator'>*</span><span class='code_typedef'>finddir_type_t</span>)(<span class='code_primitive'>struct</span>&nbsp;fs_node<span class='code_operator'>*</span>,<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span>name);
+</div>
+</p>
+<p><div class='code'>
+struct&nbsp;dirent&nbsp;//&nbsp;One&nbsp;of&nbsp;these&nbsp;is&nbsp;returned&nbsp;by&nbsp;the&nbsp;readdir&nbsp;call,&nbsp;according&nbsp;to&nbsp;POSIX.<br/>
+{<br/>
+&nbsp;&nbsp;char&nbsp;name[128];&nbsp;//&nbsp;Filename.<br/>
+&nbsp;&nbsp;u32int&nbsp;ino;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;//&nbsp;Inode&nbsp;number.&nbsp;Required&nbsp;by&nbsp;POSIX.<br/>
+};
+</div>
+</p>
+<p>We also need to define what the values in the fs_node_t::flags field mean:
+</p>
+<p><div class='code'>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;FS_FILE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0x01<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;FS_DIRECTORY&nbsp;&nbsp;&nbsp;0x02<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;FS_CHARDEVICE&nbsp;&nbsp;0x03<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;FS_BLOCKDEVICE&nbsp;0x04<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;FS_PIPE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0x05<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;FS_SYMLINK&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0x06<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;FS_MOUNTPOINT&nbsp;&nbsp;0x08&nbsp;//&nbsp;Is&nbsp;the&nbsp;file&nbsp;an&nbsp;active&nbsp;mountpoint?<br/>
+</span>
+</div>
+</p>
+<p>Notice that <i>FS_MOUNTPOINT</i> is given the value 8, not 7. This is so that it can be bitwise-OR'd in with FS_DIRECTORY. The other flags are given sequential values as they are mutually exclusive.
+</p>
+<p>Lastly we need to define the root node of the filesystem and our read/write/etc functions.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>extern</span>&nbsp;<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>fs_root;&nbsp;<span class='code_comment'>// The root of the filesystem.</span><br/>
+<br/>
+<span class='code_comment'>// Standard read/write/open/close functions. Note that these are all suffixed with</span><br/>
+<span class='code_comment'>// _fs to distinguish them from the read/write/open/close which deal with file descriptors</span><br/>
+<span class='code_comment'>// not file nodes.</span><br/>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>read_fs</span>(<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>node,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;offset,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;size,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;<span class='code_operator'>*</span>buffer);<br/>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>write_fs</span>(<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>node,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;offset,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;size,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;<span class='code_operator'>*</span>buffer);<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>open_fs</span>(<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>node,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;read,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;write);<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>close_fs</span>(<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>node);<br/>
+<span class='code_primitive'>struct</span>&nbsp;dirent&nbsp;<span class='code_operator'>*</span><span class='code_function'>readdir_fs</span>(<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>node,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;index);<br/>
+<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>finddir_fs</span>(<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>node,&nbsp;<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span>name);
+</div>
+</p>
+<p></p><h4>8.1.2.2. fs.c</h4>
+<p><div class='code'>
+<span class='code_comment'>// fs.c -- Defines the interface for and structures relating to the virtual file system.</span><br/>
+<span class='code_comment'>//         Written for JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"fs.h"<br/>
+</span><br/>
+<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>fs_root&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;<span class='code_comment'>// The root of the filesystem.</span><br/>
+<br/>
+<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>read_fs</span>(<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>node,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;offset,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;size,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;<span class='code_operator'>*</span>buffer)<br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_comment'>// Has the node got a read callback?</span><br/>
+&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(node<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>read&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;node<span class='code_operator'>-</span><span class='code_operator'>&gt;</span><span class='code_function'>read</span>(node,&nbsp;offset,&nbsp;size,&nbsp;buffer);<br/>
+&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+}
+</div>
+</p>
+<p>The above code should really be self-explanatory. If the node doesn't have a callback set, just return an error value. You should replicate the above code for open(), close() and write(). The same is true of readdir() and finddir(), although in those there should be an extra check: If the node is actually a directory!
+</p>
+<p><div class='code'>
+<span class='code_primitive'>if</span>&nbsp;((node<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>flags<span class='code_operator'>&</span><span class='code_integer'>0</span>x7)&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;FS_DIRECTORY&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span>&nbsp;node<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>readdir&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>&nbsp;)
+</div>
+</p>
+<p>Believe it or not, that is all the code that is needed to make a simple virtual filesystem! With this code as a base we can make our initial ramdisk and maybe later more complex filesystems like FAT or ext2.
+</p>
+<p></p><h2>8.2. The initial ramdisk</h2>
+<p>An initial ramdisk is just a filesystem that is loaded into memory when the kernel boots. It is useful for storing drivers and configuration files that are needed before the kernel can access the root filesystem (indeed, it usually contains the driver to access that root filesystem!).
+</p>
+<p>An <i>initrd</i>, as they are known, usually uses a propriatary filesystem format. The reason for this is that the most complex thing a filesystem has to handle, <i>deletion of files and reclaimation of space</i>, isn't necessary. The kernel should try to get the root filesystem up and running as quick as possible - why would it want to delete files from the initrd??
+</p>
+<p>As such you can just make a filesystem format up! I've made one for you as well, if you're not feeling very creative ;)
+</p>
+<p></p><h2>8.3. My own solution</h2>
+<p>My format does not support subdirectories. It stores the number of files in the system as the first 4 bytes of the initrd file. That is followed by a set number (64) of header structures, giving the names, offsets and sizes of the files contained. The actual file data follows. I have written a small C program to make this for me: it takes two arguments for each file to add: The path to the file from the current directory and the name to give the file in the generated filesystem.
+</p>
+<p></p><h3>8.3.1. Filesystem generator</h3>
+<p><div class='code'>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;&lt;stdio.h&gt;<br/>
+</span><br/>
+<span class='code_primitive'>struct</span>&nbsp;initrd_header<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>char</span>&nbsp;magic;&nbsp;<span class='code_comment'>// The magic number is there to check for consistency.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>char</span>&nbsp;name[<span class='code_integer'>64</span>];<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>int</span>&nbsp;offset;&nbsp;<span class='code_comment'>// Offset in the initrd the file starts.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>int</span>&nbsp;length;&nbsp;<span class='code_comment'>// Length of the file.</span><br/>
+};<br/>
+<br/>
+<span class='code_primitive'>int</span>&nbsp;<span class='code_function'>main</span>(<span class='code_primitive'>char</span>&nbsp;argc,&nbsp;<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span><span class='code_operator'>*</span>argv)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;nheaders&nbsp;<span class='code_operator'>=</span>&nbsp;(argc<span class='code_operator'>-</span><span class='code_integer'>1</span>)<span class='code_operator'>/</span><span class='code_integer'>2</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>struct</span>&nbsp;initrd_header&nbsp;headers[<span class='code_integer'>64</span>];<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>printf</span>(<span class='code_string'>"size&nbsp;of&nbsp;header:&nbsp;%d<span class='code_character'>\n</span>"</span>,&nbsp;<span class='code_function'>sizeof</span>(<span class='code_primitive'>struct</span>&nbsp;initrd_header));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>int</span>&nbsp;off&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_primitive'>struct</span>&nbsp;initrd_header)&nbsp;<span class='code_operator'>*</span>&nbsp;<span class='code_integer'>64</span>&nbsp;<span class='code_operator'>+</span>&nbsp;<span class='code_function'>sizeof</span>(<span class='code_primitive'>int</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>(i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;nheaders;&nbsp;i<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>printf</span>(<span class='code_string'>"writing&nbsp;file&nbsp;%s->%s&nbsp;at&nbsp;0x%x<span class='code_character'>\n</span>"</span>,&nbsp;argv[i<span class='code_operator'>*</span><span class='code_integer'>2</span><span class='code_operator'>+</span><span class='code_integer'>1</span>],&nbsp;argv[i<span class='code_operator'>*</span><span class='code_integer'>2</span><span class='code_operator'>+</span><span class='code_integer'>2</span>],&nbsp;off);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>strcpy</span>(headers[i].name,&nbsp;argv[i<span class='code_operator'>*</span><span class='code_integer'>2</span><span class='code_operator'>+</span><span class='code_integer'>2</span>]);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;headers[i].offset&nbsp;<span class='code_operator'>=</span>&nbsp;off;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;FILE&nbsp;<span class='code_operator'>*</span>stream&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>fopen</span>(argv[i<span class='code_operator'>*</span><span class='code_integer'>2</span><span class='code_operator'>+</span><span class='code_integer'>1</span>],&nbsp;<span class='code_string'>"r"</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>(stream&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>printf</span>(<span class='code_string'>"Error:&nbsp;file&nbsp;not&nbsp;found:&nbsp;%s<span class='code_character'>\n</span>"</span>,&nbsp;argv[i<span class='code_operator'>*</span><span class='code_integer'>2</span><span class='code_operator'>+</span><span class='code_integer'>1</span>]);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>1</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>fseek</span>(stream,&nbsp;<span class='code_integer'>0</span>,&nbsp;SEEK_END);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;headers[i].length&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>ftell</span>(stream);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;off&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;headers[i].length;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>fclose</span>(stream);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;headers[i].magic&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>xBF;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<br/>
+&nbsp;&nbsp;&nbsp;FILE&nbsp;<span class='code_operator'>*</span>wstream&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>fopen</span>(<span class='code_string'>"./initrd.img"</span>,&nbsp;<span class='code_string'>"w"</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span>data&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span>)<span class='code_function'>malloc</span>(off);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>fwrite</span>(<span class='code_operator'>&</span>nheaders,&nbsp;<span class='code_function'>sizeof</span>(<span class='code_primitive'>int</span>),&nbsp;<span class='code_integer'>1</span>,&nbsp;wstream);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>fwrite</span>(headers,&nbsp;<span class='code_function'>sizeof</span>(<span class='code_primitive'>struct</span>&nbsp;initrd_header),&nbsp;<span class='code_integer'>64</span>,&nbsp;wstream);<br/>
+&nbsp;&nbsp;&nbsp;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>(i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;nheaders;&nbsp;i<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;FILE&nbsp;<span class='code_operator'>*</span>stream&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>fopen</span>(argv[i<span class='code_operator'>*</span><span class='code_integer'>2</span><span class='code_operator'>+</span><span class='code_integer'>1</span>],&nbsp;<span class='code_string'>"r"</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span>buf&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>unsigned</span>&nbsp;<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span>)<span class='code_function'>malloc</span>(headers[i].length);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>fread</span>(buf,&nbsp;<span class='code_integer'>1</span>,&nbsp;headers[i].length,&nbsp;stream);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>fwrite</span>(buf,&nbsp;<span class='code_integer'>1</span>,&nbsp;headers[i].length,&nbsp;wstream);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>fclose</span>(stream);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>free</span>(buf);<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>fclose</span>(wstream);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>free</span>(data);<br/>
+&nbsp;&nbsp;&nbsp;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+}
+</div>
+</p>
+<p><i>I'm not going to explain the contents of this file: It is auxiliary and not important. Besides, you should be making your own anyway! ;)</i>
+</p>
+<p></p><h3>8.3.2. Integrating it in to your own OS</h3>
+<p><i>Even if you are using a different file format to mine, this section may be useful in helping you integrate it into the kernel.</i>
+</p>
+<p></p><h4>8.3.2.1. initrd.h</h4>
+<p>This file just defines the header structure types and gives a function prototype for the <i>initialise_initrd</i> function so the kernel can call it.
+</p>
+<p><div class='code'>
+<span class='code_comment'>// initrd.h -- Defines the interface for and structures relating to the initial ramdisk.</span><br/>
+<span class='code_comment'>//             Written for JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>ifndef</span>&nbsp;INITRD_H<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;INITRD_H<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"fs.h"<br/>
+</span><br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span><br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;nfiles;&nbsp;<span class='code_comment'>// The number of files in the ramdisk.</span><br/>
+}&nbsp;<span class='code_typedef'>initrd_header_t</span>;<br/>
+<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span><br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;magic;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Magic number, for error checking.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>s8int</span>&nbsp;name[<span class='code_integer'>64</span>];&nbsp;&nbsp;<span class='code_comment'>// Filename.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;offset;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Offset in the initrd that the file starts.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;length;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Length of the file.</span><br/>
+}&nbsp;<span class='code_typedef'>initrd_file_header_t</span>;<br/>
+<br/>
+<span class='code_comment'>// Initialises the initial ramdisk. It gets passed the address of the multiboot module,</span><br/>
+<span class='code_comment'>// and returns a completed filesystem node.</span><br/>
+<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>initialise_initrd</span>(<span class='code_primitive'>u32int</span>&nbsp;location);<br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>endif</span><br/>
+</span>
+</div>
+</p>
+<p></p><h4>8.3.2.2. initrd.c</h4>
+<p>The first thing we need is some static declarations:
+<div class='code'>
+<span class='code_comment'>// initrd.c -- Defines the interface for and structures relating to the initial ramdisk.</span><br/>
+<span class='code_comment'>//             Written for JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"initrd.h"<br/>
+</span><br/>
+<span class='code_typedef'>initrd_header_t</span>&nbsp;<span class='code_operator'>*</span>initrd_header;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The header.</span><br/>
+<span class='code_typedef'>initrd_file_header_t</span>&nbsp;<span class='code_operator'>*</span>file_headers;&nbsp;<span class='code_comment'>// The list of file headers.</span><br/>
+<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>initrd_root;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Our root directory node.</span><br/>
+<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>initrd_dev;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// We also add a directory node for /dev, so we can mount devfs later on.</span><br/>
+<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>root_nodes;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// List of file nodes.</span><br/>
+<span class='code_primitive'>int</span>&nbsp;nroot_nodes;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Number of file nodes.</span><br/>
+<br/>
+<span class='code_primitive'>struct</span>&nbsp;dirent&nbsp;dirent;
+</div>
+</p>
+<p>The next thing we need is a function to read from a file in our initrd.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>u32int</span>&nbsp;<span class='code_function'>initrd_read</span>(<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>node,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;offset,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;size,&nbsp;<span class='code_primitive'>u8int</span>&nbsp;<span class='code_operator'>*</span>buffer)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_typedef'>initrd_file_header_t</span>&nbsp;header&nbsp;<span class='code_operator'>=</span>&nbsp;file_headers[node<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>inode];<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(offset&nbsp;<span class='code_operator'>&gt;</span>&nbsp;header.length)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(offset<span class='code_operator'>+</span>size&nbsp;<span class='code_operator'>&gt;</span>&nbsp;header.length)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;size&nbsp;<span class='code_operator'>=</span>&nbsp;header.length<span class='code_operator'>-</span>offset;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>memcpy</span>(buffer,&nbsp;(<span class='code_primitive'>u8int</span><span class='code_operator'>*</span>)&nbsp;(header.offset<span class='code_operator'>+</span>offset),&nbsp;size);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;size;<br/>
+}
+</div>
+</p>
+<p>That function demonstrates one very annoying thing about writing low level code: 80% of it is error-checking. Unfortunately you can't get away from it - if you leave it out you will spend literally days trying to work out why your code doesn't work.
+</p>
+<p>It would also be quite useful to have some working readdir and finddir functions:
+</p>
+<p><div class='code'>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;dirent&nbsp;<span class='code_operator'>*</span><span class='code_function'>initrd_readdir</span>(<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>node,&nbsp;<span class='code_primitive'>u32int</span>&nbsp;index)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(node&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;initrd_root&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span>&nbsp;index&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>strcpy</span>(dirent.name,&nbsp;<span class='code_string'>"dev"</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dirent.name[<span class='code_integer'>3</span>]&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;<span class='code_comment'>// Make sure the string is NULL-terminated.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dirent.ino&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_operator'>&</span>dirent;<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(index<span class='code_operator'>-</span><span class='code_integer'>1</span>&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>=</span>&nbsp;nroot_nodes)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>strcpy</span>(dirent.name,&nbsp;root_nodes[index<span class='code_operator'>-</span><span class='code_integer'>1</span>].name);<br/>
+&nbsp;&nbsp;&nbsp;dirent.name[<span class='code_function'>strlen</span>(root_nodes[index<span class='code_operator'>-</span><span class='code_integer'>1</span>].name)]&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;<span class='code_comment'>// Make sure the string is NULL-terminated.</span><br/>
+&nbsp;&nbsp;&nbsp;dirent.ino&nbsp;<span class='code_operator'>=</span>&nbsp;root_nodes[index<span class='code_operator'>-</span><span class='code_integer'>1</span>].inode;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_operator'>&</span>dirent;<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>initrd_finddir</span>(<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>node,&nbsp;<span class='code_primitive'>char</span>&nbsp;<span class='code_operator'>*</span>name)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(node&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;initrd_root&nbsp;<span class='code_operator'>&</span><span class='code_operator'>&</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>!</span><span class='code_function'>strcmp</span>(name,&nbsp;<span class='code_string'>"dev"</span>)&nbsp;)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;initrd_dev;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;nroot_nodes;&nbsp;i<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(<span class='code_operator'>!</span><span class='code_function'>strcmp</span>(name,&nbsp;root_nodes[i].name))<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_operator'>&</span>root_nodes[i];<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+}
+</div>
+</p>
+<p>Last but not least we need to initialise the filesystem:
+</p>
+<p><div class='code'>
+<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span><span class='code_function'>initialise_initrd</span>(<span class='code_primitive'>u32int</span>&nbsp;location)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the main and file header pointers and populate the root directory.</span><br/>
+&nbsp;&nbsp;&nbsp;initrd_header&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>initrd_header_t</span>&nbsp;<span class='code_operator'>*</span>)location;<br/>
+&nbsp;&nbsp;&nbsp;file_headers&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>initrd_file_header_t</span>&nbsp;<span class='code_operator'>*</span>)&nbsp;(location<span class='code_operator'>+</span><span class='code_function'>sizeof</span>(<span class='code_typedef'>initrd_header_t</span>));
+</div>
+</p>
+<p>We assume that the kernel knows where our initrd starts and can convey that location to the initialise function.
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the root directory.</span><br/>
+&nbsp;&nbsp;&nbsp;initrd_root&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>fs_node_t</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc</span>(<span class='code_function'>sizeof</span>(<span class='code_typedef'>fs_node_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>strcpy</span>(initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>name,&nbsp;<span class='code_string'>"initrd"</span>);<br/>
+&nbsp;&nbsp;&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>mask&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>uid&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>gid&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>inode&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>length&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>flags&nbsp;<span class='code_operator'>=</span>&nbsp;FS_DIRECTORY;<br/>
+&nbsp;&nbsp;&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>read&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>write&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>open&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>close&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>readdir&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>&</span>initrd_readdir;<br/>
+&nbsp;&nbsp;&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>finddir&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>&</span>initrd_finddir;<br/>
+&nbsp;&nbsp;&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>ptr&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_root<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>impl&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;
+</div>
+</p>
+<p>Here we make the root directory node. We get some memory from the kernel heap and give the node a name. We really don't need to name this node as the root is never referenced by name, just '/'.
+</p>
+<p>Most of the code initialises pointers to NULL (0), but you'll notice that the node is told it is a directory (flags = FS_DIRECTORY) and that it has both readdir and finddir functions.
+</p>
+<p>The same is done for the /dev node:
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the /dev directory (required!)</span><br/>
+&nbsp;&nbsp;&nbsp;initrd_dev&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>fs_node_t</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc</span>(<span class='code_function'>sizeof</span>(<span class='code_typedef'>fs_node_t</span>));<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>strcpy</span>(initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>name,&nbsp;<span class='code_string'>"dev"</span>);<br/>
+&nbsp;&nbsp;&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>mask&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>uid&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>gid&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>inode&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>length&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>flags&nbsp;<span class='code_operator'>=</span>&nbsp;FS_DIRECTORY;<br/>
+&nbsp;&nbsp;&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>read&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>write&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>open&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>close&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>readdir&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>&</span>initrd_readdir;<br/>
+&nbsp;&nbsp;&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>finddir&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>&</span>initrd_finddir;<br/>
+&nbsp;&nbsp;&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>ptr&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;initrd_dev<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>impl&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;
+</div>
+</p>
+<p>Now that they're done we can start actually adding the files in the ramdisk. First we allocate space for them:
+<div class='code'>
+&nbsp;&nbsp;&nbsp;root_nodes&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_typedef'>fs_node_t</span><span class='code_operator'>*</span>)<span class='code_function'>kmalloc</span>(<span class='code_function'>sizeof</span>(<span class='code_typedef'>fs_node_t</span>)&nbsp;<span class='code_operator'>*</span>&nbsp;initrd_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>nfiles);<br/>
+&nbsp;&nbsp;&nbsp;nroot_nodes&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>nfiles;
+</div>
+</p>
+<p>Then we make them:
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// For every file...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;i;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;i&nbsp;<span class='code_operator'>&lt;</span>&nbsp;initrd_header<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>nfiles;&nbsp;i<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Edit the file's header - currently it holds the file offset</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// relative to the start of the ramdisk. We want it relative to the start</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// of memory.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;file_headers[i].offset&nbsp;<span class='code_operator'>+</span><span class='code_operator'>=</span>&nbsp;location;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Create a new file node.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>strcpy</span>(root_nodes[i].name,&nbsp;<span class='code_operator'>&</span>file_headers[i].name);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].mask&nbsp;<span class='code_operator'>=</span>&nbsp;root_nodes[i].uid&nbsp;<span class='code_operator'>=</span>&nbsp;root_nodes[i].gid&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].length&nbsp;<span class='code_operator'>=</span>&nbsp;file_headers[i].length;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].inode&nbsp;<span class='code_operator'>=</span>&nbsp;i;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].flags&nbsp;<span class='code_operator'>=</span>&nbsp;FS_FILE;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].read&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>&</span>initrd_read;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].write&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].readdir&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].finddir&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].open&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].close&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;root_nodes[i].impl&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+&nbsp;&nbsp;&nbsp;}
+</div>
+</p>
+<p>And finally return the root node so the kernel can access us:
+</p>
+<p><div class='code'>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>return</span>&nbsp;initrd_root;<br/>
+}
+</div>
+</p>
+<p></p><h2>8.4. Loading the initrd as a multiboot module</h2>
+<p>Now we need to work out how to get our initrd loaded into memory in the first place. Luckily, the multiboot specification allows for 'modules' to be loaded. We can tell GRUB to load our initrd as a module. You can do this by mounting the floppy.img file as a loopback device, finding the /boot/grub/menu.lst file and adding a 'module (fd0)/initrd' line just below the 'kernel' line.
+</p>
+<p>Alternatively you can download a new and improved image from <a href='http://www.jamesmolloy.co.uk/downloads/floppy_module.img'>here</a>.
+</p>
+<p>GRUB communicates the location of this file to us via the multiboot information structure that we declared but never defined in the first tutorial. We have to define it now: This definition is lifted directly from the <a href='http://www.gnu.org/software/grub/manual/multiboot/multiboot.html'>Multiboot spec</a>.
+</p>
+<p><i>multiboot.h</i>
+<div class='code'>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_MEM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0x001<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_DEVICE&nbsp;&nbsp;0x002<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_CMDLINE&nbsp;0x004<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_MODS&nbsp;&nbsp;&nbsp;&nbsp;0x008<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_AOUT&nbsp;&nbsp;&nbsp;&nbsp;0x010<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_ELF&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0x020<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_MMAP&nbsp;&nbsp;&nbsp;&nbsp;0x040<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_CONFIG&nbsp;&nbsp;0x080<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_LOADER&nbsp;&nbsp;0x100<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_APM&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0x200<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;MULTIBOOT_FLAG_VBE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0x400<br/>
+</span><br/>
+<span class='code_primitive'>struct</span>&nbsp;multiboot<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;flags;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;mem_lower;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;mem_upper;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;boot_device;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;cmdline;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;mods_count;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;mods_addr;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;num;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;size;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;addr;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;shndx;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;mmap_length;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;mmap_addr;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;drives_length;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;drives_addr;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;config_table;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;boot_loader_name;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;apm_table;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;vbe_control_info;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;vbe_mode_info;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;vbe_mode;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;vbe_interface_seg;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;vbe_interface_off;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;vbe_interface_len;<br/>
+}&nbsp;&nbsp;<span class='code_function'>__attribute__</span>((packed));<br/>
+<br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>struct</span>&nbsp;multiboot_header&nbsp;<span class='code_typedef'>multiboot_header_t</span>;
+</div>
+</p>
+<p>The interesting fields are the <i>mods_addr</i> and <i>mods_count</i> fields. The <i>mods_count</i> field contains the number of modules loaded. We should check that this is > 0. The <i>mods_addr</i> field is an array of addresses: Each 'entry' consists of the starting address of the module and it's end, each being 4 bytes.
+</p>
+<p>As we are only expecting one module we can just treat the <i>mods_addr</i> field as a pointer and find whatever value lies there. That will be the location of our initrd. The value of the address 4 bytes on from that will be the end address. We can use this to change the memory management placement address so that memory allocations don't accidentally overwrite our ramdisk!
+</p>
+<p><i>main.c</i>
+<div class='code'>
+<span class='code_primitive'>int</span>&nbsp;<span class='code_function'>main</span>(<span class='code_primitive'>struct</span>&nbsp;multiboot&nbsp;<span class='code_operator'>*</span>mboot_ptr)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise all the ISRs and segmentation</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>init_descriptor_tables</span>();<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the screen (by clearing it)</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_clear</span>();<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Find the location of our initial ramdisk.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>ASSERT</span>(mboot_ptr<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>mods_count&nbsp;<span class='code_operator'>&gt;</span>&nbsp;<span class='code_integer'>0</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;initrd_location&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>*</span>((<span class='code_primitive'>u32int</span><span class='code_operator'>*</span>)mboot_ptr<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>mods_addr);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;initrd_end&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_operator'>*</span>(<span class='code_primitive'>u32int</span><span class='code_operator'>*</span>)(mboot_ptr<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>mods_addr<span class='code_operator'>+</span><span class='code_integer'>4</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Don't trample our module with placement accesses, please!</span><br/>
+&nbsp;&nbsp;&nbsp;placement_address&nbsp;<span class='code_operator'>=</span>&nbsp;initrd_end;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Start paging.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>initialise_paging</span>();<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Initialise the initial ramdisk, and set it as the filesystem root.</span><br/>
+&nbsp;&nbsp;&nbsp;fs_root&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>initialise_initrd</span>(initrd_location);<br/>
+}
+</div>
+</p>
+<p>Success! That's one VFS and initrd cooked up in no time. Let's test it out.
+</p>
+<p></p><h2>8.5. Testing it out</h2>
+<p><div class='image_frame'><img src='images/the_vfs_and_initrd_bochs.png' /><br/><span class='image_caption'>Success!</span></div>Firstly let's add some test code to find all files in '/' and print their contents:
+</p>
+<p><i>main.c</i>
+<div class='code'>
+<span class='code_comment'>// list the contents of /</span><br/>
+<span class='code_primitive'>int</span>&nbsp;i&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+<span class='code_primitive'>struct</span>&nbsp;dirent&nbsp;<span class='code_operator'>*</span>node&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+<span class='code_primitive'>while</span>&nbsp;(&nbsp;(node&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>readdir_fs</span>(fs_root,&nbsp;i))&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+{<br/>
+&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"Found&nbsp;file&nbsp;"</span>);<br/>
+&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(node<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>name);<br/>
+&nbsp;&nbsp;<span class='code_typedef'>fs_node_t</span>&nbsp;<span class='code_operator'>*</span>fsnode&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>finddir_fs</span>(fs_root,&nbsp;node<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>name);<br/>
+<br/>
+&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;((fsnode<span class='code_operator'>-</span><span class='code_operator'>&gt;</span>flags<span class='code_operator'>&</span><span class='code_integer'>0</span>x7)&nbsp;<span class='code_operator'>=</span><span class='code_operator'>=</span>&nbsp;FS_DIRECTORY)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\n</span><span class='code_character'>\t</span>(directory)<span class='code_character'>\n</span>"</span>);<br/>
+&nbsp;&nbsp;<span class='code_primitive'>else</span><br/>
+&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\n</span><span class='code_character'>\t</span>&nbsp;contents:&nbsp;<span class='code_character'>\"</span>"</span>);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>char</span>&nbsp;buf[<span class='code_integer'>256</span>];<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;sz&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_function'>read_fs</span>(fsnode,&nbsp;<span class='code_integer'>0</span>,&nbsp;<span class='code_integer'>256</span>,&nbsp;buf);<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>int</span>&nbsp;j;<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_primitive'>for</span>&nbsp;(j&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;&nbsp;j&nbsp;<span class='code_operator'>&lt;</span>&nbsp;sz;&nbsp;j<span class='code_operator'>++</span>)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_put</span>(buf[j]);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\"</span><span class='code_character'>\n</span>"</span>);<br/>
+&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;i<span class='code_operator'>++</span>;<br/>
+}
+</div>
+</p>
+<p>Make a couple of test files, and build!
+</p>
+<p><div class='code'>
+./make_initrd&nbsp;test.txt&nbsp;test.txt&nbsp;test2.txt&nbsp;test2.txt<br/>
+<span 
+class='code_primitive'>cd</span>&nbsp;src<br/>
+make&nbsp;clean<br/>
+make<br/>
+<span 
+class='code_primitive'>cd</span>&nbsp;..<br/>
+./update_image.sh<br/>
+./run_bochs.sh
+</div>
+</p>
+<p>The code for this tutorial can be found <a href='http://www.jamesmolloy.co.uk/downloads/the_vfs_and_initrd.tar.gz'>here</a>.
+</p></div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+</body></html>

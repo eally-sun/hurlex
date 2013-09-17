@@ -1,0 +1,69 @@
+
+.code {
+     font-family: Monospace;
+	font-size: 10pt;
+}
+
+.code_primitive {
+     font-weight: bold;
+}
+
+.code_integer {
+     color: blue;
+}
+
+.code_hex_integer {
+     color: #8888FF;
+}
+
+.code_float {
+     color: purple;
+}
+
+.code_comment {
+     font-style: italic;
+     color: gray;
+}
+
+.code_string {
+     color: red;
+}
+
+.code_character {
+     color: green;
+}
+
+.code_preprocessor {
+     color: green;
+}
+
+.code_preprocessor_cmd {
+     font-weight: bold;
+}
+
+.code_function {
+     color: purple;
+}
+
+.code_label {
+     color: blue;
+     font-weight: bold;
+}
+
+.code_operator {
+     color: navy;
+}
+
+.code_continuation {
+     color: red;
+}
+
+.code_variable {
+     color: green;
+     font-weight: bold;
+}
+
+.code_typedef {
+     color: darkgreen;
+}
+

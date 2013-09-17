@@ -1,0 +1,357 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><title>5.-IRQs and the PIT</title><link rel='stylesheet' type='text/css' href='css/highlight.css'><link rel='stylesheet' type='text/css' href='css/layout.css'></head><body><div class="header">
+	www.jamesmolloy.co.uk
+	<div class="header_subtitle">
+		<a href="index.html">Home</a> &raquo;
+	 	JamesM's kernel development tutorials
+	</div>
+</div>
+<div class="main_frame">
+
+<div class='index'>
+<a href='1.-Environment setup.html'>1. Environment setup</a><br/><a href='2.-Genesis.html'>2. Genesis</a><br/><a href='3.-The Screen.html'>3. The Screen</a><br/><a href='4.-The GDT and IDT.html'>4. The GDT and IDT</a><br/><a href='5.-IRQs and the PIT.html' class='selected' >5. IRQs and the PIT</a><br/><a href='6.-Paging.html'>6. Paging</a><br/><a href='7.-The Heap.html'>7. The Heap</a><br/><a href='8.-The VFS and the initrd.html'>8. The VFS and the initrd</a><br/><a href='9.-Multitasking.html'>9. Multitasking</a><br/><a href='10.-User Mode.html'>10. User Mode</a><br/></div>
+<h1>5. IRQs and the PIT</h1>
+<p>In this chapter we're going to be learning about interrupt requests
+(IRQs) and the programmable interval timer (PIT).
+</p>
+<p></p><h2>5.1. Interrupt requests (theory)</h2>
+<p>There are several methods for communicating with external devices. Two
+of the most useful and popular are polling and interrupting.
+</p>
+<p><b>Polling</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Spin in a loop, occasionally checking if the device is ready.<br/>
+<b>Interrupts</b><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;Do lots of useful stuff. When the device is ready it will cause a CPU interrupt, causing your handler to be run.<br/>
+</p>
+<p>As can probably be gleaned from my biased descriptions, interrupting is
+considered better for many situations. Polling has lots of uses - some CPUs may not have an
+interrupt mechanism, or you may have many devices, or maybe you just
+need to check so infrequently that it's not worth the hassle of
+interrupts. Any rate, interrupts are a very useful method of hardware
+communication. They are used by the keyboard when keys are pressed,
+and also by the programmable interval timer (PIT).
+</p>
+<p><div class='image_frame'><img src='images/pics.png' /><br/><span class='image_caption'>The slave's output is connected to IRQ2 of the master.</span></div>The low-level concepts behind external interrupts are not very
+complex. All devices that are interrupt-capable have a line connecting
+them to the PIC (programmable interrupt controller). The PIC is the
+only device that is directly connected to the CPU's interrupt pin. It
+is used as a multiplexer, and has the ability to prioritise between
+interrupting devices. It is, essentially, a glorified 8-1
+multiplexer. At some point, someone somewhere realised that 8 IRQ
+lines just wasn't enough, and they daisy-chained another 8-1 PIC
+beside the original. So in all modern PCs, you have 2 PICs, the master
+and the slave, serving a total of 15 interruptable devices (one line
+is used to signal the slave PIC).
+</p>
+<p>The other clever thing about the PIC is that you can change the
+interrupt number it delivers for each IRQ line. This is referred to as
+<i>remapping the PIC</i> and is actually extremely useful. When the
+computer boots, the default interrupt mappings are:
+<ul>
+<li>IRQ 0..7 - INT 0x8..0xF</li>
+<li>IRQ 8..15 - INT 0x70..0x77</li>
+</ul>
+This causes us somewhat of a problem. The master's IRQ mappings
+(0x8-0xF) conflict with the interrupt numbers used by the CPU to
+signal exceptions and faults (see last <a href='4.'>chapter</a>). The normal
+thing to do is to remap the PICs so that IRQs 0..15 correspond to ISRs
+32..47 (31 being the last CPU-used ISR).
+</p>
+<p></p><h2>5.2. Interrupt requests (practical)</h2>
+<p>The PICs are communicated with via the I/O bus. Each has a command
+port and a data port:
+<ul>
+<li>Master - command: 0x20, data: 0x21</li>
+<li>Slave - command: 0xA0, data: 0xA1</li>
+</ul>
+The code for remapping the PICs is the most difficult and
+obfusticated. To remap them, you have to do a full reinitialisation of
+them, which is why the code is so long. If you're interested in what's
+actually happening, there is a nice description
+<a href='http://www.osdev.org/wiki/PIC'>here</a>.
+</p>
+<p><div class='code'>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_idt</span>()<br/>
+{<br/>
+&nbsp;&nbsp;...<br/>
+&nbsp;&nbsp;<span class='code_comment'>// Remap the irq table.</span><br/>
+&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x20,&nbsp;<span class='code_integer'>0</span>x11);<br/>
+&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>xA0,&nbsp;<span class='code_integer'>0</span>x11);<br/>
+&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x21,&nbsp;<span class='code_integer'>0</span>x20);<br/>
+&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>xA1,&nbsp;<span class='code_integer'>0</span>x28);<br/>
+&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x21,&nbsp;<span class='code_integer'>0</span>x04);<br/>
+&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>xA1,&nbsp;<span class='code_integer'>0</span>x02);<br/>
+&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x21,&nbsp;<span class='code_integer'>0</span>x01);<br/>
+&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>xA1,&nbsp;<span class='code_integer'>0</span>x01);<br/>
+&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x21,&nbsp;<span class='code_integer'>0</span>x0);<br/>
+&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>xA1,&nbsp;<span class='code_integer'>0</span>x0);<br/>
+&nbsp;&nbsp;...<br/>
+&nbsp;&nbsp;<span class='code_function'>idt_set_gate</span>(<span class='code_integer'>32</span>,&nbsp;(<span class='code_primitive'>u32int</span>)irq0,&nbsp;<span class='code_integer'>0</span>x08,&nbsp;<span class='code_integer'>0</span>x8E);<br/>
+&nbsp;&nbsp;...<br/>
+&nbsp;&nbsp;<span class='code_function'>idt_set_gate</span>(<span class='code_integer'>47</span>,&nbsp;(<span class='code_primitive'>u32int</span>)irq15,&nbsp;<span class='code_integer'>0</span>x08,&nbsp;<span class='code_integer'>0</span>x8E);<br/>
+}
+</div>
+</p>
+<p>Notice that now we are also setting IDT gates for numbers 32-47, for
+our IRQ handlers. We must, therefore, also add stubs for these in
+interrupt.s. Also, though, we need a new macro in interrupt.s - an IRQ
+stub will have 2 numbers associated with it - it's IRQ number (0-15)
+and it's interrupt number (32-47):
+</p>
+<p><div class='code'>
+<span class='code_comment'>; This macro creates a stub for an IRQ - the first parameter is</span><br/>
+<span class='code_comment'>; the IRQ number, the second is the ISR number it is remapped to.</span><br/>
+<span class='code_preprocessor'>%<span class='code_preprocessor_cmd'>macro</span></span>&nbsp;IRQ&nbsp;2<br/>
+&nbsp;&nbsp;global&nbsp;irq%1<br/>
+&nbsp;&nbsp;<span class='code_label'>irq%1:</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>cli</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;byte&nbsp;0<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;byte&nbsp;%2<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_operator'>jmp</span>&nbsp;irq_common_stub<br/>
+<span class='code_preprocessor'>%<span class='code_preprocessor_cmd'>endmacro</span></span><br/>
+&nbsp;<br/>
+...
+</div>
+</p>
+<p><div class='code'>
+IRQ&nbsp;&nbsp;&nbsp;0,&nbsp;&nbsp;&nbsp;&nbsp;32<br/>
+IRQ&nbsp;&nbsp;&nbsp;1,&nbsp;&nbsp;&nbsp;&nbsp;33<br/>
+...<br/>
+IRQ&nbsp;&nbsp;15,&nbsp;&nbsp;&nbsp;&nbsp;47
+</div>
+</p>
+<p>We also have a new common stub - <i>irq_common_stub</i>. This is because
+IRQs behave subtly differently - before you return from an IRQ
+handler, you must inform the PIC that you have finished, so it can
+dispatch the next (if there is one waiting). This is known as an EOI
+(end of interrupt). There is a slight complication though. If the
+master PIC sent the IRQ (number 0-7), we must send an EOI to the
+master (obviously). If the <i>slave</i> sent the IRQ (8-15), we must send
+an EOI to both the master <i>and</i> the slave (because of the
+daisy-chaining of the two).
+</p>
+<p>First our asm common stub. It is almost identical to
+<i>isr_common_stub</i>.
+</p>
+<p><div class='code'>
+<span class='code_comment'>; In isr.c</span><br/>
+[<span class='code_primitive'>EXTERN</span>&nbsp;irq_handler]<br/>
+<br/>
+<span class='code_comment'>; This is our common IRQ stub. It saves the processor state, sets</span><br/>
+<span class='code_comment'>; up for kernel mode segments, calls the C-level fault handler,</span><br/>
+<span class='code_comment'>; and finally restores the stack frame. </span><br/>
+<span class='code_label'>irq_common_stub:</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>pusha</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Pushes edi,esi,ebp,esp,ebx,edx,ecx,eax</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ax,&nbsp;ds&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Lower 16-bits of eax = ds.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>push</span>&nbsp;eax&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; save the data segment descriptor</span><br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ax,&nbsp;0x10&nbsp;&nbsp;<span class='code_comment'>; load the kernel data segment descriptor</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ds,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;es,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;fs,&nbsp;ax<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;gs,&nbsp;ax<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>call</span>&nbsp;irq_handler<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>pop</span>&nbsp;ebx&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; reload the original data segment descriptor</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;ds,&nbsp;bx<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;es,&nbsp;bx<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;fs,&nbsp;bx<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>mov</span>&nbsp;gs,&nbsp;bx<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>popa</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Pops edi,esi,ebp...</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>add</span>&nbsp;esp,&nbsp;8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; Cleans up the pushed error code and pushed ISR number</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>sti</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_operator'>iret</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>; pops 5 things at once: CS, EIP, EFLAGS, SS, and ESP</span>
+</div>
+</p>
+<p>Now the C code (goes in isr.c):
+</p>
+<p><div class='code'>
+<span class='code_comment'>// This gets called from our ASM interrupt handler stub.</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>irq_handler</span>(<span class='code_typedef'>registers_t</span>&nbsp;regs)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Send an EOI (end of interrupt) signal to the PICs.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// If this interrupt involved the slave.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(regs.int_no&nbsp;<span class='code_operator'>&gt;</span><span class='code_operator'>=</span>&nbsp;<span class='code_integer'>40</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Send reset signal to slave.</span><br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>xA0,&nbsp;<span class='code_integer'>0</span>x20);<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Send reset signal to master. (As well as slave, if necessary).</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x20,&nbsp;<span class='code_integer'>0</span>x20);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>if</span>&nbsp;(interrupt_handlers[regs.int_no]&nbsp;<span class='code_operator'>!=</span>&nbsp;<span class='code_integer'>0</span>)<br/>
+&nbsp;&nbsp;&nbsp;{<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_typedef'>isr_t</span>&nbsp;handler&nbsp;<span class='code_operator'>=</span>&nbsp;interrupt_handlers[regs.int_no];<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class='code_function'>handler</span>(regs);<br/>
+&nbsp;&nbsp;&nbsp;}<br/>
+}
+</div>
+</p>
+<p>This is fairly straightforward - if the IRQ was > 7 (interrupt number
+> 40), we send a reset signal to the slave. In either case, we send
+one to the master also.
+</p>
+<p>You may also notice that I have added a small custom handler
+mechanism, allowing you to register custom interrupt handlers. This
+can be very useful as an abstraction technique, and will neaten up our
+code nicely.
+</p>
+<p>Some other declarations are needed:
+</p>
+<p></p><h3>5.2.1. isr.h</h3>
+<p><div class='code'>
+<span class='code_comment'>// A few defines to make life a little easier</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;IRQ0&nbsp;32<br/>
+</span>...<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;IRQ15&nbsp;47<br/>
+</span><br/>
+<span class='code_comment'>// Enables registration of callbacks for interrupts or IRQs.</span><br/>
+<span class='code_comment'>// For IRQs, to ease confusion, use the #defines above as the</span><br/>
+<span class='code_comment'>// first parameter.</span><br/>
+<span class='code_primitive'>typedef</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;(<span class='code_operator'>*</span><span class='code_typedef'>isr_t</span>)(<span class='code_typedef'>registers_t</span>);<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>register_interrupt_handler</span>(<span class='code_primitive'>u8int</span>&nbsp;n,&nbsp;<span class='code_typedef'>isr_t</span>&nbsp;handler);
+</div>
+</p>
+<p></p><h3>5.2.2. isr.c</h3>
+<p><div class='code'>
+<span class='code_typedef'>isr_t</span>&nbsp;interrupt_handlers[<span class='code_integer'>256</span>];<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>register_interrupt_handler</span>(<span class='code_primitive'>u8int</span>&nbsp;n,&nbsp;<span class='code_typedef'>isr_t</span>&nbsp;handler)<br/>
+{<br/>
+&nbsp;&nbsp;interrupt_handlers[n]&nbsp;<span class='code_operator'>=</span>&nbsp;handler;<br/>
+}
+</div>
+</p>
+<p>And there we go! We can now handle interrupt requests from external
+devices, and dispatch them to custom handlers. Now all we need is some
+interrupt requests to handle!
+</p>
+<p></p><h2>5.3. The PIT (theory)</h2>
+<p>The programmable interval timer is a chip connected to IRQ0. It can
+interrupt the CPU at a user-defined rate (between 18.2Hz and 1.1931
+MHz). The PIT is the primary method used for implementing a system
+clock and the only method available for implementing multitasking
+(switch processes on interrupt).
+</p>
+<p>The PIT has an internal clock which oscillates at approximately
+1.1931MHz. This clock signal is fed through a <a href='http://en.wikipedia.org/wiki/Frequency_divider'>frequency divider</a>, to modulate
+the final output frequency. It has 3 channels, each with it's own
+frequency divider.
+</p>
+<p><ul>
+<li>Channel 0 is the most useful. It's output is connected to IRQ0.</li>
+<li>Channel 1 is very un-useful and on modern hardware is no longer implemented. It used to control refresh rates for <a href='http://en.wikipedia.org/wiki/DRAM'>DRAM</a>.</li>
+<li>Channel 2 controls the PC speaker.</li>
+</ul>
+</p>
+<p>Channel 0 is the only one of use to us at the moment.
+</p>
+<p>OK, so we want
+to set the PIT up so it interrupts us at regular intervals, at
+frequency f. I generally set <i>f</i> to be about 100Hz (once every
+10 milliseconds), but feel free to set it to whatever you like. To do
+this, we send the PIT a 'divisor'. This is the number that it should
+divide it's input frequency (1.9131MHz) by. It's dead easy to work
+out:
+</p>
+<p><div class='code'>
+divisor&nbsp;=&nbsp;1193180&nbsp;Hz&nbsp;/&nbsp;frequency&nbsp;(in&nbsp;Hz)
+</div>
+</p>
+<p>Also worthy of note is that the PIT has 4 registers in I/O space -
+0x40-0x42 are the data ports for channels 0-2 respectively, and 0x43
+is the command port.
+</p>
+<p></p><h2>5.4. The PIT (practical)</h2>
+<p>We'll need a few new files. Timer.h has only a declaration in it:
+</p>
+<p><div class='code'>
+<span class='code_comment'>// timer.h -- Defines the interface for all PIT-related functions.</span><br/>
+<span class='code_comment'>//            Written for JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>ifndef</span>&nbsp;TIMER_H<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>define</span>&nbsp;TIMER_H<br/>
+</span><br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"common.h"<br/>
+</span><br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_timer</span>(<span class='code_primitive'>u32int</span>&nbsp;frequency);<br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>endif</span><br/>
+</span>
+</div>
+</p>
+<p>And timer.c doesn't have much in either:
+</p>
+<p><div class='code'>
+<span class='code_comment'>// timer.c -- Initialises the PIT, and handles clock updates.</span><br/>
+<span class='code_comment'>//            Written for JamesM's kernel development tutorials.</span><br/>
+<br/>
+<span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"timer.h"<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"isr.h"<br/>
+</span><span class='code_preprocessor'>#<span class='code_preprocessor_cmd'>include</span>&nbsp;"monitor.h"<br/>
+</span><br/>
+<span class='code_primitive'>u32int</span>&nbsp;tick&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>0</span>;<br/>
+<br/>
+<span class='code_primitive'>static</span>&nbsp;<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>timer_callback</span>(<span class='code_typedef'>registers_t</span>&nbsp;regs)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;tick<span class='code_operator'>++</span>;<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"Tick:&nbsp;"</span>);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write_dec</span>(tick);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>monitor_write</span>(<span class='code_string'>"<span class='code_character'>\n</span>"</span>);<br/>
+}<br/>
+<br/>
+<span class='code_primitive'>void</span>&nbsp;<span class='code_function'>init_timer</span>(<span class='code_primitive'>u32int</span>&nbsp;frequency)<br/>
+{<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Firstly, register our timer callback.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>register_interrupt_handler</span>(IRQ0,&nbsp;<span class='code_operator'>&</span>timer_callback);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// The value we send to the PIT is the value to divide it's input clock</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// (1193180 Hz) by, to get our required frequency. Important to note is</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// that the divisor must be small enough to fit into 16-bits.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u32int</span>&nbsp;divisor&nbsp;<span class='code_operator'>=</span>&nbsp;<span class='code_integer'>1193180</span>&nbsp;<span class='code_operator'>/</span>&nbsp;frequency;<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Send the command byte.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x43,&nbsp;<span class='code_integer'>0</span>x36);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Divisor has to be sent byte-wise, so split here into upper/lower bytes.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;l&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u8int</span>)(divisor&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFF);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_primitive'>u8int</span>&nbsp;h&nbsp;<span class='code_operator'>=</span>&nbsp;(<span class='code_primitive'>u8int</span>)(&nbsp;(divisor<span class='code_operator'>&gt;</span><span class='code_operator'>&gt;</span><span class='code_integer'>8</span>)&nbsp;<span class='code_operator'>&</span>&nbsp;<span class='code_integer'>0</span>xFF&nbsp;);<br/>
+<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_comment'>// Send the frequency divisor.</span><br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x40,&nbsp;l);<br/>
+&nbsp;&nbsp;&nbsp;<span class='code_function'>outb</span>(<span class='code_integer'>0</span>x40,&nbsp;h);<br/>
+}
+</div>
+</p>
+<p>OK, lets go through this code. Firstly, we have our <i>init_timer</i>
+function. This tells our interrupt mechanism that we want to handle
+IRQ0 with the function <i>timer_callback</i>. This will be called
+whenever a timer interrupt is recieved. We then calculate the divisor
+to be sent to the PIT (see theory above). Then, we send a command byte
+to the PIT's command port. This byte (0x36) sets the PIT to repeating
+mode (so that when the divisor counter reaches zero it's automatically
+refreshed) and tells it we want to set the divisor value.
+</p>
+<p>We then send the divisor value. Note that it must be sent as two
+seperate bytes, not as one 16-bit value.
+</p>
+<p>When this is done, all we have to do is edit our Makefile, add one
+line to main.c
+</p>
+<p><div class='code'>
+<span class='code_function'>init_timer</span>(<span class='code_integer'>50</span>);&nbsp;<span class='code_comment'>// Initialise timer to 50Hz</span>
+</div>
+</p>
+<p><div class='image_frame'><img src='images/irqs_and_the_pit_bochs.png' /><br/><span class='image_caption'>A clock!</span></div>,compile, and run! You
+should get output like that on the right. Note however that bochs does
+not accurately emulate the timer chip, so although your code will run
+at the correct speed on a real machine, it probably won't in bochs!
+</p>
+<p>Full source code for this tutorial can be found
+<a href='/downloads/irqs_and_the_pit.tar.gz'>here</a>.
+</p></div>
+<div class="footer">Copyright James Molloy 2008 - james&lt;at&gt;jamesmolloy.co.uk</div>
+</body></html>
