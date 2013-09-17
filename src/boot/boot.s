@@ -64,8 +64,8 @@ mboot:
 [EXTERN hx_main] 	; 内核 C 代码的入口
 
 start:
-	cli  		; 我们关闭中断，然后启动内核
 	push ebx 	; 调用内核 main 函数的参数，struct multiboot *mboot_ptr
+	cli  		; 我们关闭中断，然后启动内核
 	call hx_main
 	jmp $ 		; 到这里结束，其实 hlt 是不是更好点呢？关机什么的后面再说
 

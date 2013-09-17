@@ -18,8 +18,8 @@ CC = gcc
 LD = ld
 ASM = nasm
 
-C_FLAGS = -c -Wall -nostdlib -nostdinc -fno-builtin -fno-stack-protector -Iinclude
-LD_FLAGS = -Tscripts/kernel.ld -melf_i386
+C_FLAGS = -c -Wall -nostdlib -nostdinc -fno-builtin -fno-stack-protector -I include
+LD_FLAGS = -T scripts/kernel.ld -m elf_i386
 ASM_FLAGS = -f elf
 
 all: $(S_OBJECTS) $(C_OBJECTS) link
@@ -47,4 +47,6 @@ update_image:
 	sudo cp kernel /mnt/kernel/kernel
 	sleep 1
 	sudo umount /mnt/kernel
-
+.PHONY:run
+run:
+	bochs -f bochsrc.txt
