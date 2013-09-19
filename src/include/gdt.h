@@ -22,8 +22,7 @@
 #include "common.h"
 
 // 全局描述符类型
-typedef struct
-{
+typedef struct gdt_entry_t {
 	uint16_t limit_low;     // 段界限   15～0
 	uint16_t base_low;      // 段基地址 15～0
 	uint8_t  base_middle;   // 段基地址 23～16
@@ -33,8 +32,7 @@ typedef struct
 } __attribute__((packed)) gdt_entry_t;
 
 // GDTR
-typedef struct
-{
+typedef struct gdt_ptr_t {
 	uint16_t limit;       // 全局描述符表限长
 	uint32_t base;        // 全局描述符表 32位 基地址
 } __attribute__((packed)) gdt_ptr_t;

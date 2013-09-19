@@ -21,3 +21,4 @@ gdt_flush:
 			  ; 远跳目的是清空流水线并串行化处理器
 .flush:
 	ret
+.end:

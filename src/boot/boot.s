@@ -19,14 +19,6 @@ MBOOT_HEADER_FLAGS 	equ 	MBOOT_PAGE_ALIGN | MBOOT_MEM_INFO
 ; 结果必须是32位的无符号值0(即magic + flags + checksum = 0)
 MBOOT_CHECKSUM 		equ 	- (MBOOT_HEADER_MAGIC + MBOOT_HEADER_FLAGS)
 
-[BITS 32]  ; 所有代码以 32-bit 的方式编译
-
-; 声明一些符号
-[GLOBAL mboot]
-[EXTERN _code]
-[EXTERN _bss]
-[EXTERN _end]
-
 ; 符合Multiboot规范的 OS 映象需要这样一个 magic Multiboot 头
 
 ; Multiboot 头的分布必须如下表所示：
@@ -49,17 +41,26 @@ MBOOT_CHECKSUM 		equ 	- (MBOOT_HEADER_MAGIC + MBOOT_HEADER_FLAGS)
 ; 未完，详细说明请参阅 GNU 相关文档
 ;-----------------------------------------------------------
 
+[BITS 32]  ; 所有代码以 32-bit 的方式编译
+
+; 声明一些符号
+[GLOBAL mboot]
+[EXTERN _code]
+[EXTERN _bss]
+[EXTERN _end]
+
 mboot:
 	dd MBOOT_HEADER_MAGIC 		; GRUB 会通过这个魔数判断该映像是否支持
 	dd MBOOT_HEADER_FLAGS        	; GRUB 的一些加载时选项，其详细注释在定义处
 	dd MBOOT_CHECKSUM            	; 检测数值，其含义在定义处
 
-[GLOBAL start] 	; 内核代码入口
+[GLOBAL start] 		; 内核代码入口
 [EXTERN hx_main] 	; 内核 C 代码的入口
 
 start:
-	push ebx 	; 调用内核 main 函数的参数，struct multiboot *mboot_ptr
 	cli  		; 我们关闭中断，然后启动内核
+	push ebx 	; 调用内核 main 函数的参数，struct multiboot *mboot_ptr
 	call hx_main
 	jmp $ 		; 到这里结束，其实 hlt 是不是更好点呢？关机什么的后面再说
+.end:
 

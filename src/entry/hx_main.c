@@ -1,7 +1,7 @@
 /*
  * =====================================================================================
  *
- *       Filename:  main.c
+ *       Filename: hx_ main.c
  *
  *    Description:  hurlex 内核的入口函数
  *
@@ -19,14 +19,20 @@
 #include "multiboot.h"
 #include "monitor.h"
 #include "gdt.h"
+#include "idt.h"
 
 int hx_main(multiboot_t *mboot_ptr)
 {
 	init_gdt();
+	init_idt();
+
 	monitor_clear();
 	monitor_write_color("Hello, hurlex kernel!\n", rc_black, rc_green);
 	monitor_write_color("This is a simple OS kernel, just for study.\n", rc_black, rc_red);
 	monitor_write_color("You can copy it freely!\n", rc_black, rc_red);
 	
+	// 测试中断处理程序
+	asm volatile("int $0x2");
+
 	return 0;
 }
