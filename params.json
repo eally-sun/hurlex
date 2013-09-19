@@ -1,0 +1,1 @@
+{"name":"Hurlex","tagline":"","body":"\r\n一个运行在x86-IA32架构下的小内核，要求能驱动x86简单的硬件并且等待用户输入指令执行。\r\n","google":"","note":"Don't delete this file! It's used internally to help with page regeneration."}
