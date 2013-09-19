@@ -1,6 +1,6 @@
 ; ----------------------------------------------------------------
 ;
-; 	boot.s -- 内核从这里开始. 
+; 	boot.s -- 内核从这里开始
 ;
 ;                 这里还有根据 GRUB Multiboot 规范的一些定义
 ;
@@ -12,7 +12,7 @@ MBOOT_PAGE_ALIGN 	equ 	1 << 0    	; 0 号位表示所有的引导模块将按页
 MBOOT_MEM_INFO 		equ 	1 << 1    	; 1 号位通过 Multiboot 信息结构的 mem_* 域包括可用内存的信息(一般的ELF映像这样就可以)
 MBOOT_AOUT_KLUDGE 	equ 	1 << 16
 
-; 注意：我们并没有加上第16位(MBOOT_AOUT_KLUDGE)，这意味着 GRUB 不会使用我们的符号表
+; 注意，我们并没有加上第16位(MBOOT_AOUT_KLUDGE)，这意味着 GRUB 不会使用我们的符号表
 MBOOT_HEADER_FLAGS 	equ 	MBOOT_PAGE_ALIGN | MBOOT_MEM_INFO
 
 ; 域checksum是一个32位的无符号值，当与其他的magic域(也就是magic和flags)相加时，
@@ -53,12 +53,6 @@ mboot:
 	dd MBOOT_HEADER_MAGIC 		; GRUB 会通过这个魔数判断该映像是否支持
 	dd MBOOT_HEADER_FLAGS        	; GRUB 的一些加载时选项，其详细注释在定义处
 	dd MBOOT_CHECKSUM            	; 检测数值，其含义在定义处
-
-	dd mboot                     	; header_addr   -- 本描述符的起始位置
-	dd _code                      	; load_addr     -- 内核 .text 段起始位置
-	dd _bss                       	; load_end_addr -- 内核 .data 段结束位置
-	dd _end                       	; bss_end_addr  -- 内核 .bss  段结束位置
-	dd start                     	; entry_addr    -- 内核入口位置
 
 [GLOBAL start] 	; 内核代码入口
 [EXTERN hx_main] 	; 内核 C 代码的入口
