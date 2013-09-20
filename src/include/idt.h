@@ -65,6 +65,12 @@ typedef void (*interrupt_handler_t)(registers_t *);
 // 注册一个中断处理函数
 void register_interrupt_handler(uint8_t n, interrupt_handler_t h);
 
+// 调用中断处理函数
+void idt_handler(registers_t *regs);
+
+// IRQ 处理函数
+void irq_handler(registers_t *regs);
+
 // 声明中断处理函数 0-18 属于 CPU 的异常中断
 void isr0(); 		// 0 #DE 除 0 异常 
 void isr1(); 		// 1 #DB 调试异常 
@@ -86,6 +92,7 @@ void isr16(); 		// 16 #MF 浮点处理单元错误
 void isr17(); 		// 17 #AC 对齐检查 
 void isr18(); 		// 18 #MC 机器检查 
 void isr19(); 		// 19 #XM SIMD(单指令多数据)浮点异常
+
 // 20-31 Intel 保留
 void isr20();
 void isr21();
