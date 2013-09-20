@@ -17,7 +17,7 @@
  */
 
 #include "idt.h"
-#include "monitor.h"
+#include "printk.h"
 #include "string.h"
 
 // 中断描述符表
@@ -103,7 +103,7 @@ void idt_handler(registers_t *regs)
 	if (interrupt_handlers[regs->int_no]) {
 	      interrupt_handlers[regs->int_no](regs);
 	} else {
-		monitor_write_color("Unhandled interrupt\n", rc_black, rc_white);
+		printk_color(rc_black, rc_blue, "Unhandled interrupt: %d\n", regs->int_no);
 	}
 }
 

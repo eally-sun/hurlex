@@ -30,12 +30,12 @@ all: $(S_OBJECTS) $(C_OBJECTS) link
 	$(CC) $(C_FLAGS) $< -o $@
 
 .s.o:
-	@echo 编译 $< ...
-	nasm $(ASM_FLAGS) $<
+	@echo 编译汇编文件 $< ...
+	$(ASM) $(ASM_FLAGS) $<
 
 link:
 	@echo 链接内核文件...
-	ld $(LD_FLAGS) $(C_OBJECTS) $(S_OBJECTS) -o kernel
+	$(LD) $(LD_FLAGS) $(S_OBJECTS) $(C_OBJECTS) -o kernel
 
 .PHONY:clean
 clean:

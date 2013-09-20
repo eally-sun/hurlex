@@ -17,7 +17,7 @@
  */
 
 #include "multiboot.h"
-#include "monitor.h"
+#include "printk.h"
 #include "gdt.h"
 #include "idt.h"
 
@@ -27,12 +27,11 @@ int hx_main(multiboot_t *mboot_ptr)
 	init_idt();
 
 	monitor_clear();
-	monitor_write_color("Hello, hurlex kernel!\n", rc_black, rc_green);
-	monitor_write_color("This is a simple OS kernel, just for study.\n", rc_black, rc_red);
-	monitor_write_color("You can copy it freely!\n", rc_black, rc_red);
+	printk_color(rc_black, rc_green, "Hello, hurlex kernel!\n");
+	printk_color(rc_black, rc_red, "This is a simple OS kernel, just for study.\nYou can copy it freely!\n\n");
 	
 	// 测试中断处理程序
-	asm volatile("int $0x2");
+	asm volatile("int $0x3");
 
 	return 0;
 }

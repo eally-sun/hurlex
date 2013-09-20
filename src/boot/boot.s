@@ -43,6 +43,8 @@ MBOOT_CHECKSUM 		equ 	- (MBOOT_HEADER_MAGIC + MBOOT_HEADER_FLAGS)
 
 [BITS 32]  ; 所有代码以 32-bit 的方式编译
 
+section .text
+
 ; 声明一些符号
 [GLOBAL mboot]
 [EXTERN _code]
@@ -59,8 +61,15 @@ mboot:
 
 start:
 	cli  		; 我们关闭中断，然后启动内核
+	mov esp, stack  ; 设置栈地址
 	push ebx 	; 调用内核 main 函数的参数，struct multiboot *mboot_ptr
+	mov ebp, 0
+    
 	call hx_main
 	jmp $ 		; 到这里结束，其实 hlt 是不是更好点呢？关机什么的后面再说
 .end:
+
+section .bss
+    resb 32768
+stack:
 
