@@ -20,10 +20,9 @@
 #include "printk.h"
 #include "idt.h"
 
-uint32_t tick = 0;
-
 void timer_callback(registers_t *regs)
 {
+	static uint32_t tick = 0;
 	tick++;
 	printk_color(rc_black, rc_red, "Tick: %d\n", tick);
 }

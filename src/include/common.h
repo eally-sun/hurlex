@@ -19,6 +19,10 @@
 #ifndef INCLUDE_COMMON_H_
 #define INCLUDE_COMMON_H_
 
+#ifndef NULL
+#define NULL 0
+#endif
+
 // 几个类型的重定义
 typedef unsigned int   uint32_t;
 typedef          int   int32_t;
