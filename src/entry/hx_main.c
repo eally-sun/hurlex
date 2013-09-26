@@ -23,6 +23,8 @@
 #include "timer.h"
 #include "panic.h"
 #include "elf.h"
+#include "pmm.h"
+#include "vmm.h"
 
 elf_t kernel_elf;
 
@@ -35,12 +37,18 @@ int hx_main(multiboot_t *mboot_ptr)
 	printk_color(rc_black, rc_green, "Hello, hurlex kernel!\n");
 	printk_color(rc_black, rc_red, "This is a simple OS kernel, just for study.\nYou can copy it freely!\n\n");
 	
-	//init_timer(20);
+	init_timer(20);
 	//asm volatile("sti");
 		
-	kernel_elf = elf_from_multiboot(mboot_ptr);
+	//kernel_elf = elf_from_multiboot(mboot_ptr);
+	//panic("Testing panic mechanism");
+	
+	init_pmm(mboot_ptr->mem_upper);
+	init_vmm();
 
-	panic ("Testing panic mechanism");
+	printk_color(rc_black, rc_blue, "Start Paging Mode...\n");
+
+	while (1);	
 
 	return 0;
 }
