@@ -21,11 +21,17 @@
 
 #define PMM_STACK_ADDR 	0xFF000000
 
+// 初始化物理内存管理
 void init_pmm(uint32_t start);
 
+// 返回一个内存页的物理地址
 uint32_t pmm_alloc_page();
 
+// 释放申请的内存
 void pmm_free_page(uint32_t p);
+
+// 是否开启内存分页
+extern char mm_paging_active;
 
 #endif 	// INCLUDE_PMM_H
 
