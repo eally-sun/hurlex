@@ -37,7 +37,7 @@ int hx_main(multiboot_t *mboot_ptr)
 	printk_color(rc_black, rc_green, "Hello, hurlex kernel!\n");
 	printk_color(rc_black, rc_red, "This is a simple OS kernel, just for study.\nYou can copy it freely!\n\n");
 	
-	init_timer(20);
+	//init_timer(20);
 	//asm volatile("sti");
 		
 	//kernel_elf = elf_from_multiboot(mboot_ptr);
