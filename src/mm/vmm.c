@@ -89,7 +89,7 @@ void init_vmm()
 	bzero((void *)page_tables[pt_idx * 1024], 0x1000);
 
 	// 设置分页模式开启标记
-	pmm_paging_active = 1;
+	mm_paging_active = 1;
 }
 
 void switch_page_directory(page_directory_t *pd)

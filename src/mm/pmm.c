@@ -44,7 +44,7 @@ void init_pmm(uint32_t start)
 uint32_t pmm_alloc_page()
 {
 	// 根据是否开启分页决定对内存的管理策略
-	if (pmm_paging_active) {
+	if (mm_paging_active) {
 		// 确认栈地址没有下溢
 		if (pmm_stack_loc == PMM_STACK_ADDR) {
 			panic("Error: Out of Memory!");
