@@ -50,12 +50,12 @@ void init_idt ()
 	outb(0x21, 0x0);
 	outb(0xA1, 0x0);
 
-	memset ((uint8_t *)&interrupt_handlers, 0, sizeof(interrupt_handler_t) * 256);
+	bzero((uint8_t *)&interrupt_handlers, sizeof(interrupt_handler_t) * 256);
 	
 	idt_ptr.limit = sizeof(idt_entry_t) * 256 - 1;
 	idt_ptr.base  = (uint32_t)&idt_entries;
 	
-	memset ((uint8_t *)&idt_entries, 0, sizeof(idt_entry_t) * 255);
+	bzero((uint8_t *)&idt_entries, sizeof(idt_entry_t) * 255);
 
 	// 0-32:  用于 CPU 的中断处理
 	// 255:   将来用于实现系统调用

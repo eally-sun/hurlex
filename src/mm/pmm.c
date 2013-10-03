@@ -21,10 +21,17 @@
 #include "vmm.h"
 #include "pmm.h"
 
+// 当前申请到的位置
 uint32_t pmm_stack_loc = PMM_STACK_ADDR;
+
+// 内存申请的界限位置
 uint32_t pmm_stack_max = PMM_STACK_ADDR;
-uint32_t pmm_location = 0;
-char 	 mm_paging_active = 0;
+
+// 没有开启分页机制时的内存管理方案采用的管理指针
+uint32_t pmm_location;
+
+// 是否开启内存分页
+char mm_paging_active = 0;
 
 void init_pmm(uint32_t start)
 {
@@ -36,12 +43,13 @@ void init_pmm(uint32_t start)
 
 uint32_t pmm_alloc_page()
 {
-	// 根据是否开启分页决定管理策略
+	// 根据是否开启分页决定对内存的管理策略
 	if (pmm_paging_active) {
-		// 以内核栈地址为界限
+		// 确认栈地址没有下溢
 		if (pmm_stack_loc == PMM_STACK_ADDR) {
 			panic("Error: Out of Memory!");
 		}
+		// 相当于出栈
 		pmm_stack_loc -= sizeof(uint32_t);
 		uint32_t *stack = (uint32_t *)pmm_stack_loc;
 

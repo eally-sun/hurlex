@@ -33,6 +33,11 @@ inline void memset(void *dest, uint8_t val, uint32_t len)
 	}
 }
 
+inline void bzero(void *dest, uint32_t len)
+{
+	memset(dest, 0, len);
+}
+
 inline int strcmp(const char *str1, const char *str2)
 {
 	while (*str1 && *str2 && (*str1++ == *str2++))

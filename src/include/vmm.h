@@ -27,10 +27,12 @@
 // 页表虚拟地址
 #define PAGE_TABLE_VIRTUAL_ADDR 	0xFFC00000
 
+// 这两个宏用于页表和页目录的索引获取
 #define PAGE_DIR_IDX(x) 		((uint32_t)x / 1024)
 #define PAGE_TABLE_IDX(x) 		((uint32_t)x % 1024)
 
 /**
+ * 分段和分页需要硬件上的支持，x86 提供这项服务的是集成在 CPU 内部的 MMU 组件
  * 以下页表项的一些宏定义
  *
  * 详细的说明按理应该写在文档中，但考虑到理解上的便利，姑且详细注释于此。
@@ -63,6 +65,7 @@
 // 页掩码，用于 4KB 对齐
 #define PAGE_MASK      0xFFFFF000
 
+// 页目录数据类型
 typedef uint32_t page_directory_t;
 
 // 初始化虚拟内存管理
