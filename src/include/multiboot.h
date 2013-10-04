@@ -45,24 +45,24 @@
  */
 
 typedef struct multiboot_t {
-	uint32_t flags;
-	uint32_t mem_lower;
+	uint32_t flags;			// Multiboot 的版本信息
+	uint32_t mem_lower;		// 从 BIOS 获知的可用内存
 	uint32_t mem_upper;
-	uint32_t boot_device;
-	uint32_t cmdline;
-	uint32_t mods_count;
+	uint32_t boot_device;		// root 分区
+	uint32_t cmdline;		// 内核命令行
+	uint32_t mods_count;		// boot 模块列表
 	uint32_t mods_addr;
 	uint32_t num;
 	uint32_t size;
 	uint32_t addr;
 	uint32_t shndx;
-	uint32_t mmap_length;
+	uint32_t mmap_length;		// 内存映射缓存
 	uint32_t mmap_addr;
 	uint32_t drives_length;
 	uint32_t drives_addr;
-	uint32_t config_table;
-	uint32_t boot_loader_name;
-	uint32_t apm_table;
+	uint32_t config_table; 		// ROM 配置表
+	uint32_t boot_loader_name; 	// boot loader 的名字
+	uint32_t apm_table; 	    	// APM 表
 	uint32_t vbe_control_info;
 	uint32_t vbe_mode_info;
 	uint32_t vbe_mode;
