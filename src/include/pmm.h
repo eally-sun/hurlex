@@ -19,7 +19,8 @@
 #ifndef INCLUDE_PMM_H
 #define INCLUDE_PMM_H
 
-// 物理内存管理的栈下限地址，我们定在了寻址空间的较高位置
+// 物理内存管理的栈地址，我们定在了寻址空间的较高位置
+// 我们要能通过这个地址管理所有的内存
 #define PMM_STACK_ADDR 	0xFF000000
 
 // 初始化物理内存管理

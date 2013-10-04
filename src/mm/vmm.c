@@ -80,7 +80,8 @@ void init_vmm()
 	
 	// 以上的设置解决了分页模型下我们可以通过 0xFFBFF000访问到虚拟页目录
 	// 我们也能用 0xFFC00000 访问到 0 号页表的地址
-	// 但问题是... 前 4 MB的物理地址和虚拟地址相同啊...不知道这么设计是啥意思...
+	// 而且，我们使用 0xFFC00000 这个虚拟地址 页表 部分的偏移
+	// 就可以顺利找到页目录每一项所指向的页表数据块了
 
 	// 设置好当前的页目录地址
 	switch_page_directory(pd);
@@ -90,9 +91,17 @@ void init_vmm()
 	cr0 |= 0x80000000;
 	asm volatile("mov %0, %%cr0" : : "r" (cr0));
 
-	// 我们需要设置物理内存管理的页表，否则 pmm_free_page 函数就错误了
+	// PMM_STACK_ADDR 0xFF000000 物理内存管理的栈地址
+	// 这一步找到了该地址应该在页目录的项目
 	uint32_t pt_idx = PAGE_DIR_IDX((PMM_STACK_ADDR >> 12));
+
+	// 给该项分配内存
 	page_directory[pt_idx] = pmm_alloc_page() | PAGE_PRESENT | PAGE_WRITE;
+
+	// 给该内存页数据清 0，注意这里乘以 1024 相当于左移 10 位
+	// 注意这里数组的类型是 4 字节类型！所以计算数组地址偏移的时候会乘以 4
+	// 所以我们只要乘以 1024 ，一共乘以 4096，等于左移了 12 位
+	// 这样就自动计算出了目标地址的 页表 自身的数据结构的偏移地址
 	bzero((void *)page_tables[pt_idx * 1024], 0x1000);
 
 	// 设置分页模式开启标记
@@ -113,10 +122,11 @@ void map(uint32_t va, uint32_t pa, uint32_t flags)
 	// 找到虚拟地址 va 对应的描述表，如果它没被使用的话
 	if (page_directory[pt_idx] == 0) {
 		page_directory[pt_idx] = pmm_alloc_page() | PAGE_PRESENT | PAGE_WRITE;
+		// 这里不再解释，原理同上
 		bzero((void *)page_tables[pt_idx * 1024], 0x1000);
 	}
 
-	// 创建好以后设置页表项
+	// 创建好以后设置页表项，让这个地址所处的那一页内存指向目标物理内存页
 	page_tables[virtual_page] = (pa & PAGE_MASK) | flags;
 }
 
@@ -140,7 +150,9 @@ char get_mapping(uint32_t va, uint32_t *pa)
 	}
 
 	if (page_tables[virtual_page] != 0) {
-		if (pa) *pa = page_tables[virtual_page] & PAGE_MASK;
+		if (pa) {
+			 *pa = page_tables[virtual_page] & PAGE_MASK;
+		}
 		return 1;
 	}
 
