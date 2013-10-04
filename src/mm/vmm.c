@@ -68,7 +68,7 @@ void init_vmm()
 	
 	bzero(pt, 0x1000);
 	
-	// 这样做的结构就是 0xFFBFF000 这个页目录的虚拟地址正好被映射到了实际的物理地址
+	// 这样做的结果就是 0xFFBFF000 这个页目录的虚拟地址正好被映射到了页目录实际的物理地址
 	// 0xFFBFF 拆开就是 1111111110 1111111111 其正好是 1022 1023
 	// 即就是第 1022 号 页表的第 1023 项，正好是物理页目录的地址
 	pt[1023] = (uint32_t)pd | PAGE_PRESENT | PAGE_WRITE;
@@ -90,7 +90,7 @@ void init_vmm()
 	cr0 |= 0x80000000;
 	asm volatile("mov %0, %%cr0" : : "r" (cr0));
 
-	// 我们需要设置物理内存管理的页表，都则 pmm_free_page 函数就错误了
+	// 我们需要设置物理内存管理的页表，否则 pmm_free_page 函数就错误了
 	uint32_t pt_idx = PAGE_DIR_IDX((PMM_STACK_ADDR >> 12));
 	page_directory[pt_idx] = pmm_alloc_page() | PAGE_PRESENT | PAGE_WRITE;
 	bzero((void *)page_tables[pt_idx * 1024], 0x1000);
