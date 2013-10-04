@@ -44,7 +44,7 @@ void init_vmm()
 	register_interrupt_handler(14, &page_fault);
 
 	// 创建一个页目录，此时未开启分页
-	page_directory_t *pd = (page_directory_t*)pmm_alloc_page();
+	page_directory_t *pd = (page_directory_t *)pmm_alloc_page();
 
 	// 清空整个页目录的数据为 0
 	bzero(pd, 0x1000);
@@ -62,18 +62,25 @@ void init_vmm()
 	      pt[i] = i * 0x1000 | PAGE_PRESENT | PAGE_WRITE;
 	}
 
-	// 我们再映射 4G 地址空间最后的 8 MB 内存，这是较前 4 MB
+	// 我们再映射 4G 地址空间最后的地址
 	pd[1022] = pmm_alloc_page() | PAGE_PRESENT | PAGE_WRITE;
 	pt = (uint32_t*) (pd[1022] & PAGE_MASK);
 	
 	bzero(pt, 0x1000);
-
-	// 这是最后的 4 MB了
+	
+	// 这样做的结构就是 0xFFBFF000 这个页目录的虚拟地址正好被映射到了实际的物理地址
+	// 0xFFBFF 拆开就是 1111111110 1111111111 其正好是 1022 1023
+	// 即就是第 1022 号 页表的第 1023 项，正好是物理页目录的地址
 	pt[1023] = (uint32_t)pd | PAGE_PRESENT | PAGE_WRITE;
 
-	// 页表最后的地址循环回了页目录自己....
+	// 页表虚拟地址 0xFFC00000 就是 1111111111 0000000000 转换后就是 1023 0
+	// 即就是第 1023 号页表的第 0 项，正好是内核 4 MB 页表的地址
 	// 好奇葩的设计，我快被绕晕了
 	pd[1023] = (uint32_t)pd | PAGE_PRESENT | PAGE_WRITE;
+	
+	// 以上的设置解决了分页模型下我们可以通过 0xFFBFF000访问到虚拟页目录
+	// 我们也能用 0xFFC00000 访问到 0 号页表的地址
+	// 但问题是... 前 4 MB的物理地址和虚拟地址相同啊...不知道这么设计是啥意思...
 
 	// 设置好当前的页目录地址
 	switch_page_directory(pd);

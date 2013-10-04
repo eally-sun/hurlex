@@ -71,7 +71,7 @@ typedef uint32_t page_directory_t;
 // 初始化虚拟内存管理
 void init_vmm();
 
-// 交换地址空间
+// 更换当前的页目录
 void switch_page_directory(page_directory_t *pd);
 
 // 使用 flags 指出的页权限，把物理地址 pa 映射到虚拟地址 va
