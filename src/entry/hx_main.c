@@ -25,6 +25,7 @@
 #include "elf.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "heap.h"
 
 elf_t kernel_elf;
 
@@ -34,7 +35,7 @@ int hx_main(multiboot_t *mboot_ptr)
 	init_idt();
 
 	monitor_clear();
-	printk_color(rc_black, rc_green, "Hello, hurlex kernel!\n");
+	printk_color(rc_black, rc_green, "Hello, hurlex kernel!\n\n");
 	printk_color(rc_black, rc_red, "This is a simple OS kernel, just for study.\nYou can copy it freely!\n\n");
 	
 	//init_timer(20);
@@ -47,7 +48,9 @@ int hx_main(multiboot_t *mboot_ptr)
 	init_vmm();
 	init_page_pmm(mboot_ptr);
 
-	printk_color(rc_black, rc_blue, "Start Paging Mode...\n");
+	init_heap();
+
+	printk_color(rc_black, rc_cyan, "Start Paging Mode & Init Heap ...\n");
 
 	while (1);	
 
