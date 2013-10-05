@@ -92,6 +92,9 @@ void init_vmm()
 	asm volatile("mov %0, %%cr0" : : "r" (cr0));
 
 	// PMM_STACK_ADDR 0xFF000000 物理内存管理的栈地址
+	// 必须在分页模式开启之前给该项分配内存，否则会直接引起异常
+	// 异常的原因是调用了 pmm_free_page 后触发 map 调用，map 会调用 pmm_alloc_page
+	// 但是 pmm_alloc_age 此时无法找到可用内存，导致触发下溢条件 panic 结束
 	// 这一步找到了该地址应该在页目录的项目
 	uint32_t pt_idx = PAGE_DIR_IDX((PMM_STACK_ADDR >> 12));
 
@@ -145,14 +148,14 @@ char get_mapping(uint32_t va, uint32_t *pa)
 	uint32_t virtual_page = va / 0x1000;
 	uint32_t pt_idx = PAGE_DIR_IDX(virtual_page);
 
+	// 如果当前地址没有被映射直接返回 0
 	if (page_directory[pt_idx] == 0) {
 	      return 0;
 	}
-
-	if (page_tables[virtual_page] != 0) {
-		if (pa) {
-			 *pa = page_tables[virtual_page] & PAGE_MASK;
-		}
+	
+	// 如果地址有效而且指针不为NULL，则返回地址
+	if (page_tables[virtual_page] != 0 && pa) {
+		 *pa = page_tables[virtual_page] & PAGE_MASK;
 		return 1;
 	}
 

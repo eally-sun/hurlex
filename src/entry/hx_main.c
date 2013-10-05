@@ -45,6 +45,7 @@ int hx_main(multiboot_t *mboot_ptr)
 	
 	init_pmm(mboot_ptr->mem_upper);
 	init_vmm();
+	init_page_pmm(mboot_ptr);
 
 	printk_color(rc_black, rc_blue, "Start Paging Mode...\n");
 
