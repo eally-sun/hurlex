@@ -47,15 +47,19 @@ void init_pmm(uint32_t start)
 void init_page_pmm(multiboot_t *mboot_ptr)
 {
 	#ifdef SHOW_MEM_MAP
+	
 	// 打印 BIOS 反馈的内存布局
-	mmap_entry_t *mmap;
+	printk("1 MB under:\n");
+	printk("mem_lower: 0x%X\n", mboot_ptr->mem_lower);
+	printk("mem_upper: 0x%X\n\n", mboot_ptr->mem_upper);
 
-	printk("mmap_addr = 0x%x, mmap_length = 0x%x\n\n", (unsigned)mboot_ptr->mmap_addr, (unsigned)mboot_ptr->mmap_length);
+	mmap_entry_t *mmap;
+	printk("mmap_addr = 0x%X, mmap_length = 0x%X\n\n", (unsigned)mboot_ptr->mmap_addr, (unsigned)mboot_ptr->mmap_length);
 	for (mmap = (mmap_entry_t *) mboot_ptr->mmap_addr;
 		(unsigned long) mmap < mboot_ptr->mmap_addr + mboot_ptr->mmap_length; 
 		mmap = (mmap_entry_t *)((unsigned long)mmap + mmap->size + sizeof(mmap->size))) {
-	      printk("  size = 0x%x, base_addr = 0x%x%x,"
-				      " length = 0x%x%x, type = 0x%x\n",
+	      printk("  size = 0x%X, base_addr = 0x%X%X,"
+				      " length = 0x%X%X, type = 0x%X\n",
 				      (unsigned)mmap->size,
 				      (unsigned)mmap->base_addr_high,
 				      (unsigned)mmap->base_addr_low,
