@@ -30,11 +30,11 @@ static uint32_t heap_max = HEAP_START;
 static header_t *heap_first = 0;
 
 // 目前看起来不需要做什么...
-void init_heap ()
+void init_heap()
 {
 }
 
-void *kmalloc (uint32_t len)
+void *kmalloc(uint32_t len)
 {
 	len += sizeof(header_t);
 
@@ -43,7 +43,7 @@ void *kmalloc (uint32_t len)
 
 	while (cur_header) {
 		if (cur_header->allocated == 0 && cur_header->length >= len) {
-			split_chunk (cur_header, len);
+			split_chunk(cur_header, len);
 			cur_header->allocated = 1;
 			return (void *)((uint32_t)cur_header + sizeof(header_t));
 		}
@@ -59,7 +59,7 @@ void *kmalloc (uint32_t len)
 		heap_first = (header_t *)chunk_start;
 	}
 
-	alloc_chunk (chunk_start, len);
+	alloc_chunk(chunk_start, len);
 	cur_header = (header_t *)chunk_start;
 	cur_header->prev = prev_header;
 	cur_header->next = 0;
@@ -71,24 +71,24 @@ void *kmalloc (uint32_t len)
 	return (void*)(chunk_start + sizeof (header_t));
 }
 
-void kfree (void *p)
+void kfree(void *p)
 {
 	header_t *header = (header_t*)((uint32_t)p - sizeof(header_t));
 	header->allocated = 0;
 
-	glue_chunk (header);
+	glue_chunk(header);
 }
 
-void alloc_chunk (uint32_t start, uint32_t len)
+void alloc_chunk(uint32_t start, uint32_t len)
 {
 	while (start + len > heap_max) {
 		uint32_t page = pmm_alloc_page();
-		map (heap_max, page, PAGE_PRESENT | PAGE_WRITE);
+		map(heap_max, page, PAGE_PRESENT | PAGE_WRITE);
 		heap_max += 0x1000;
 	}
 }
 
-void free_chunk (header_t *chunk)
+void free_chunk(header_t *chunk)
 {
 	chunk->prev->next = 0;
 
@@ -99,18 +99,18 @@ void free_chunk (header_t *chunk)
 	while ((heap_max - 0x1000) >= (uint32_t)chunk) {
 		heap_max -= 0x1000;
 		uint32_t page;
-		get_mapping (heap_max, &page);
-		pmm_free_page (page);
-		unmap (heap_max);
+		get_mapping(heap_max, &page);
+		pmm_free_page(page);
+		unmap(heap_max);
 	}
 }
 
-void split_chunk (header_t *chunk, uint32_t len)
+void split_chunk(header_t *chunk, uint32_t len)
 {
 	// In order to split a chunk, once we split we need to know that there will be enough
 	// space in the new chunk to store the chunk header, otherwise it just isn't worthwhile.
 	if (chunk->length - len > sizeof (header_t)) {
-		header_t *newchunk = (header_t *) ((uint32_t)chunk + chunk->length);
+		header_t *newchunk = (header_t *)((uint32_t)chunk + chunk->length);
 		newchunk->prev = chunk;
 		newchunk->next = 0;
 		newchunk->allocated = 0;
@@ -121,7 +121,7 @@ void split_chunk (header_t *chunk, uint32_t len)
 	}
 }
 
-void glue_chunk (header_t *chunk)
+void glue_chunk(header_t *chunk)
 {
 	if (chunk->next && chunk->next->allocated == 0) {
 		chunk->length = chunk->length + chunk->next->length;

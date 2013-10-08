@@ -25,10 +25,11 @@
 #define HEAP_START 0xD0000000
 
 // 堆结束地址
-#define HEAP_END   0xFFBFF000
+//#define HEAP_END   0xFFBFF000
+// 此处有错吧？这个地址岂不是重叠覆盖过了物理内存页的栈管理地址
+#define HEAP_END   0xFF000000
 
-typedef struct header
-{
+typedef struct header {
 	struct header *prev;
 	struct header *next;
 	uint32_t allocated : 1;
@@ -39,7 +40,7 @@ typedef struct header
 void init_heap();
 
 // 内存申请
-void *kmalloc (uint32_t len);
+void *kmalloc(uint32_t len);
 
 // 内存释放
 void kfree(void *p);
