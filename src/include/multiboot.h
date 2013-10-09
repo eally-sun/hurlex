@@ -61,6 +61,12 @@ typedef struct multiboot_t {
 	uint32_t cmdline;		// 内核命令行
 	uint32_t mods_count;		// boot 模块列表
 	uint32_t mods_addr;
+	
+	/**
+	 * ELF 格式内核映像的section头表、每项的大小、一共有几项以及作为名字索引的字符串表。
+	 * 它们对应于可执行可连接格式（ELF）的program头中的shdr_* 项（shdr_num等）。
+	 * 所有的section都会被载入，ELF section头的物理地址域指向所有的section在内存中的位置。
+	 */
 	uint32_t num;
 	uint32_t size;
 	uint32_t addr;

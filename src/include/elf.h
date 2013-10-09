@@ -24,6 +24,7 @@
 
 #define ELF32_ST_TYPE(i) ((i)&0xf)
 
+// ELF 格式区段头
 typedef struct elf_section_header_t {
   uint32_t name;
   uint32_t type;
@@ -36,7 +37,8 @@ typedef struct elf_section_header_t {
   uint32_t addralign;
   uint32_t entsize;
 } __attribute__((packed)) elf_section_header_t;
-  
+
+// ELF 格式符号
 typedef struct elf_symbol_t {
   uint32_t name;
   uint32_t value;
@@ -46,7 +48,8 @@ typedef struct elf_symbol_t {
   uint16_t shndx;
 } __attribute__((packed)) elf_symbol_t;
 
-typedef struct elf_t{
+// ELF 信息
+typedef struct elf_t {
   elf_symbol_t *symtab;
   uint32_t      symtabsz;
   const char   *strtab;
@@ -57,6 +60,6 @@ typedef struct elf_t{
 elf_t elf_from_multiboot(multiboot_t *mb);
 
 // 查看ELF的符号信息
-const char *elf_lookup_symbol (uint32_t addr, elf_t *elf);
+const char *elf_lookup_symbol(uint32_t addr, elf_t *elf);
 
 #endif 	// INCLUDE_ELF_H_
