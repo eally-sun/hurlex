@@ -29,11 +29,12 @@
 // 此处有错吧？这个地址岂不是重叠覆盖过了物理内存页的栈管理地址
 #define HEAP_END   0xFF000000
 
+// 内存块管理结构
 typedef struct header {
-	struct header *prev;
+	struct header *prev; 	// 前后内存块管理结构指针
 	struct header *next;
-	uint32_t allocated : 1;
-	uint32_t length : 31;
+	uint32_t allocated : 1;	// 该内存块是否已经被申请
+	uint32_t length : 31; 	// 当前内存块的长度
 } header_t;
 
 // 初始化堆

@@ -52,6 +52,22 @@ int hx_main(multiboot_t *mboot_ptr)
 
 	printk_color(rc_black, rc_cyan, "Start Paging Mode & Init Heap ...\n");
 
+	void * addr1 = kmalloc(50);
+	printk("kmalloc 50 mem in 0x%X\n", kmalloc(50));
+	void * addr2 = kmalloc(500);
+	printk("kmalloc 500 mem in 0x%X\n", kmalloc(500));
+	void * addr3 = kmalloc(5000);
+	printk("kmalloc 5000 mem in 0x%X\n", kmalloc(5000));
+
+	printk("free mem in 0x%X\n", addr1);
+	kfree(addr1);
+	printk("free mem in 0x%X\n", addr2);
+	kfree(addr2);
+	printk("free mem in 0x%X\n", addr3);
+	kfree(addr3);
+
+	printk_color(rc_black, rc_red, "kernel heap succeed!\n");
+
 	while (1);	
 
 	return 0;
