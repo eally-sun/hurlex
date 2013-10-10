@@ -31,33 +31,39 @@ elf_t kernel_elf;
 
 int hx_main(multiboot_t *mboot_ptr)
 {
+	kernel_elf = elf_from_multiboot(mboot_ptr);
+	
 	init_gdt();
 	init_idt();
 
 	monitor_clear();
-	printk_color(rc_black, rc_green, "Hello, hurlex kernel!\n\n");
-	printk_color(rc_black, rc_red, "This is a simple OS kernel, just for study.\nYou can copy it freely!\n\n");
+	printk_color(rc_black, rc_red, "**************************\n");
+	printk_color(rc_black, rc_red, "*  Hello, hurlex kernel! *\n");
+	printk_color(rc_black, rc_red, "**************************\n\n");
+	printk_color(rc_black, rc_green, "This is a simple OS kernel, just for study.\nYou can copy it freely!\n\n");
 	
 	//init_timer(20);
 	//asm volatile("sti");
-		
-	//kernel_elf = elf_from_multiboot(mboot_ptr);
-	//panic("Testing panic mechanism");
-	
-	init_pmm(mboot_ptr->mem_upper);
+
+	init_pmm(mboot_ptr);
 	init_vmm();
 	init_page_pmm(mboot_ptr);
 
 	init_heap();
 
-	printk_color(rc_black, rc_cyan, "Start Paging Mode & Init Heap ...\n");
+	printk_color(rc_black, rc_cyan, "Start Paging Mode ...\n\n");
+	
+	printk_color(rc_black, rc_magenta, "Kernel heap created ...\n\n");
+	printk_color(rc_black, rc_magenta, "Test kmalloc() && kfree() now ...\n\n");
 
-	void * addr1 = kmalloc(50);
-	printk("kmalloc 50 mem in 0x%X\n", kmalloc(50));
-	void * addr2 = kmalloc(500);
-	printk("kmalloc 500 mem in 0x%X\n", kmalloc(500));
-	void * addr3 = kmalloc(5000);
-	printk("kmalloc 5000 mem in 0x%X\n", kmalloc(5000));
+	void *addr1 = kmalloc(50);
+	printk("kmalloc    50 byte in 0x%X\n", addr1);
+	void *addr2 = kmalloc(500);
+	printk("kmalloc   500 byte in 0x%X\n", addr2);
+	void *addr3 = kmalloc(5000);
+	printk("kmalloc  5000 byte in 0x%X\n", addr3);
+	void *addr4 = kmalloc(50000);
+	printk("kmalloc 50000 byte in 0x%X\n\n", addr4);
 
 	printk("free mem in 0x%X\n", addr1);
 	kfree(addr1);
@@ -65,10 +71,8 @@ int hx_main(multiboot_t *mboot_ptr)
 	kfree(addr2);
 	printk("free mem in 0x%X\n", addr3);
 	kfree(addr3);
-
-	printk_color(rc_black, rc_red, "kernel heap succeed!\n");
-
-	while (1);	
+	printk("free mem in 0x%X\n\n", addr4);
+	kfree(addr4);
 
 	return 0;
 }

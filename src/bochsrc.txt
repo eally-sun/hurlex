@@ -5,7 +5,7 @@
 # --------------------------------------------------------------------
 
 # 内存
-megs: 4
+megs: 32
 
 # ROM 文件
 romimage: file="$BXSHARE/BIOS-bochs-latest"

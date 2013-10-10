@@ -22,7 +22,7 @@
 #include "vmm.h"
 #include "pmm.h"
 
-#define SHOW_MEM_MAP
+//#define SHOW_MEM_MAP
 
 // 当前申请到的位置
 uint32_t pmm_stack_loc = PMM_STACK_ADDR;
@@ -36,22 +36,13 @@ uint32_t pmm_location;
 // 是否开启内存分页
 char mm_paging_active = 0;
 
-void init_pmm(uint32_t start)
-{
-	// 因为起始地址必须按照 4KB 对齐，所以和掩码做与运算
-	// 考虑到减少地址值会覆盖原先的数据，所以先增加 4KB 再与运算
-	// 此处至多有 4KB 的内存浪费，但是效率更重要
-	pmm_location = (start + 0x1000) & PAGE_MASK;
-}
-
-void init_page_pmm(multiboot_t *mboot_ptr)
+void init_pmm(multiboot_t *mboot_ptr)
 {
 	#ifdef SHOW_MEM_MAP
 	
-	// 打印 BIOS 反馈的内存布局
-	printk("1 MB under:\n");
-	printk("mem_lower: 0x%X\n", mboot_ptr->mem_lower);
-	printk("mem_upper: 0x%X\n\n", mboot_ptr->mem_upper);
+	// 打印 GRUB 提供的 由 BIOS 的反馈内存布局
+	printk("mem_lower: 0x%X\n", mboot_ptr->mem_lower * 1024);
+	printk("mem_upper: 0x%X\n\n", mboot_ptr->mem_upper * 1024);
 
 	mmap_entry_t *mmap;
 	printk("mmap_addr = 0x%X, mmap_length = 0x%X\n\n", (unsigned)mboot_ptr->mmap_addr, (unsigned)mboot_ptr->mmap_length);
@@ -74,17 +65,40 @@ void init_page_pmm(multiboot_t *mboot_ptr)
 	while (i < mboot_ptr->mmap_addr + mboot_ptr->mmap_length) {
 		mmap_entry_t *map_entry = (mmap_entry_t *)i;
 		// 如果是可用内存(按照协议，1 表示可用内存，其它数字指保留区域)
-		if (map_entry->type == 1) {
+		// 我们暂时使用 1 MB 以下低端区域即可满足临时的内存需求
+		if (map_entry->type == 1 && map_entry->base_addr_low < 0x100000) {
+			// 因为起始地址必须按照 4KB 对齐，所以和掩码做与运算
+			// 考虑到减少地址值会覆盖原先的数据，所以先增加 4KB 再与运算
+			// 此处至多有 4KB 的内存浪费，但是效率更重要
+			pmm_location = (map_entry->base_addr_low + 0x1000) & PAGE_MASK;
+			return;
+		}
+		// multiboot 规范中大小这项数据不包含指针自身的大小
+		// 所以我们要再加上一个指针大小，真是奇怪的规范 - -
+		i += map_entry->size + sizeof(uint32_t);
+	}
+	panic("Not found 1 MB under memory!");
+}
+
+void init_page_pmm(multiboot_t *mboot_ptr)
+{	
+	uint32_t i = mboot_ptr->mmap_addr;
+	while (i < mboot_ptr->mmap_addr + mboot_ptr->mmap_length) {
+		mmap_entry_t *map_entry = (mmap_entry_t *)i;
+		// BIOS 探测出的可用内存是包含了我们的内核所在空间的，我们直接舍弃 1 MB 低端区域
+		if (map_entry->type == 1 && map_entry->base_addr_low >= 0x100000) {
 			// 把这些内存段，按页存储到页管理栈里
-			// TODO 警告，我们操作系统装载所在内存也被加入!
 			uint32_t j = map_entry->base_addr_low;
 			while (j < map_entry->base_addr_low + map_entry->length_low) {
+				// 我们的内核从 0x100000 开始加载，暂时我们粗略的递增 1 MB 跳过内核所在
+				// 当然，这样的方法实在太过于简陋，暂且保留，我们是要改进的
+				if (j == 0x100000) {
+					j += 0x100000;
+				}
 				pmm_free_page(j);
 				j += 0x1000;
 			}
 		}
-		// multiboot 规范中大小这项数据不包含指针自身的大小
-		// 所以我们要再加上一个指针大小，真是奇怪的规范 - -
 		i += map_entry->size + sizeof(uint32_t);
 	}
 }

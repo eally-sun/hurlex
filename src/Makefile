@@ -47,6 +47,15 @@ update_image:
 	sudo cp kernel /mnt/kernel/kernel
 	sleep 1
 	sudo umount /mnt/kernel
+
+.PHONY:mount_image
+mount_image:
+	sudo mount floppy.img /mnt/kernel
+
+.PHONY:umount_image
+umount_image:
+	sudo umount /mnt/kernel
+
 .PHONY:run
 run:
 	bochs -f bochsrc.txt

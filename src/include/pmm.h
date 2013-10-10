@@ -26,7 +26,7 @@
 #define PMM_STACK_ADDR 	0xFF000000
 
 // 初始化物理内存管理
-void init_pmm(uint32_t start);
+void init_pmm(multiboot_t *mboot_ptr);
 
 // 初始化分页内存管理
 // 从空闲物理内存中取得内存页添加到内存页管理栈中
