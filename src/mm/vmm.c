@@ -40,7 +40,7 @@ void init_vmm()
 	int i;
 	uint32_t cr0;
 
-	// 注册页错误中断的处理函数( 14 是页故障的中断号)
+	// 注册页错误中断的处理函数(14 是页故障的中断号)
 	register_interrupt_handler(14, &page_fault);
 
 	// 创建一个页目录，此时未开启分页
@@ -192,7 +192,7 @@ void page_fault(registers_t *regs)
 	}
 	// bit 4 为 1 表示错误发生在取指令的时候
 	if (regs->err_code & 0x10) {
-		printk_color(rc_black, rc_red, "the fault occurred during an instruction fetch.\n");
+		printk_color(rc_black, rc_red, "The fault occurred during an instruction fetch.\n");
 	}
 
 	panic("Page Error:");

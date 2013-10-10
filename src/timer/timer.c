@@ -19,12 +19,16 @@
 #include "timer.h"
 #include "printk.h"
 #include "idt.h"
+#include "scheduler.h"
 
 void timer_callback(registers_t *regs)
 {
-	static uint32_t tick = 0;
-	tick++;
-	printk_color(rc_black, rc_red, "Tick: %d\n", tick);
+	//static uint32_t tick = 0;
+	//tick++;
+	//printk_color(rc_black, rc_red, "Tick: %d\n", tick);
+	
+	// 进行内核线程的调度
+	schedule();
 }
 
 void init_timer(uint32_t frequency)
@@ -40,7 +44,7 @@ void init_timer(uint32_t frequency)
 	outb(0x43, 0x36);
 
 	uint8_t low = (uint8_t)(divisor & 0xFF);
-	uint8_t hign = (uint8_t)( (divisor>>8) & 0xFF );
+	uint8_t hign = (uint8_t)((divisor >> 8) & 0xFF);
 
 	outb(0x40, low);
 	outb(0x40, hign);

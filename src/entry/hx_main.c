@@ -26,35 +26,47 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "heap.h"
+#include "thread.h"
+#include "scheduler.h"
 
 elf_t kernel_elf;
 
+int thread_func(void *arg);
+
 int hx_main(multiboot_t *mboot_ptr)
 {
+	// 从 GRUB 提供的信息中获取到内核符号表和代码地址信息
 	kernel_elf = elf_from_multiboot(mboot_ptr);
 	
+	// 初始化全局段描述符表
 	init_gdt();
+
+	// 初始化全局中断描述符表
 	init_idt();
 
+	// 清屏
 	monitor_clear();
 	printk_color(rc_black, rc_red, "**************************\n");
 	printk_color(rc_black, rc_red, "*  Hello, hurlex kernel! *\n");
 	printk_color(rc_black, rc_red, "**************************\n\n");
 	printk_color(rc_black, rc_green, "This is a simple OS kernel, just for study.\nYou can copy it freely!\n\n");
 	
-	//init_timer(20);
-	//asm volatile("sti");
-
+	// 初始化物理内存管理
 	init_pmm(mboot_ptr);
+
+	// 初始化虚拟内存管理
 	init_vmm();
+
+	// 初始化物理内存可用页
 	init_page_pmm(mboot_ptr);
 
+	// 初始化内核态堆管理
 	init_heap();
 
 	printk_color(rc_black, rc_cyan, "Start Paging Mode ...\n\n");
 	
 	printk_color(rc_black, rc_magenta, "Kernel heap created ...\n\n");
-	printk_color(rc_black, rc_magenta, "Test kmalloc() && kfree() now ...\n\n");
+/*	printk_color(rc_black, rc_magenta, "Test kmalloc() && kfree() now ...\n\n");
 
 	void *addr1 = kmalloc(50);
 	printk("kmalloc    50 byte in 0x%X\n", addr1);
@@ -73,7 +85,32 @@ int hx_main(multiboot_t *mboot_ptr)
 	kfree(addr3);
 	printk("free mem in 0x%X\n\n", addr4);
 	kfree(addr4);
+*/
+
+	// 初始化内核线程调度
+	init_scheduler(init_threading());
+	
+	void *thread_stack = kmalloc(0x400) + 0x3F0;
+	create_thread(thread_func, 0, thread_stack);
+
+	// 初始化时钟中断
+	init_timer(20);
+
+	// 解除对 INTR 中断的屏蔽
+	asm volatile("sti");
+
+	while (1) {
+		printk("A");
+	}
 
 	return 0;
 }
 
+int thread_func(void *arg)
+{
+	while (1) {
+		printk("B");
+	}
+
+	return (int)arg;
+}
