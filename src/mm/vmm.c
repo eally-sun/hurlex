@@ -168,7 +168,7 @@ void page_fault(registers_t *regs)
 	asm volatile ("mov %%cr2, %0" : "=r" (cr2));
 
 	printk("Page fault at 0x%x, virtual faulting address 0x%x\n", regs->eip, cr2);
-	printk("Error code: %x  ", regs->err_code);
+	printk("Error code: %x\n", regs->err_code);
 
 	// bit 0 为 0 指页面不存在内存里
 	if ( !(regs->err_code & 0x1)) {

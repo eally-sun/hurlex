@@ -90,8 +90,10 @@ int hx_main(multiboot_t *mboot_ptr)
 	// 初始化内核线程调度
 	init_scheduler(init_threading());
 	
-	void *thread_stack = kmalloc(0x400) + 0x3F0;
-	create_thread(thread_func, 0, thread_stack);
+	void *thread_stack = kmalloc(0x400);
+
+	// 创建内核线程，注意栈地址从高往低增长
+	create_thread(thread_func, 0, thread_stack + 0x3F0);
 
 	// 初始化时钟中断
 	init_timer(20);
