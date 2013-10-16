@@ -43,8 +43,8 @@ struct idt_ptr_t {
 
 // 寄存器类型
 typedef
-struct registers_t {
-	uint32_t ds;
+struct pt_regs_t {
+	uint32_t ds;		// 用于保存用户的数据段描述符
 	uint32_t edi; 		// 从 edi 到 eax 由 pusha 指令压入
 	uint32_t esi; 
 	uint32_t ebp;
@@ -54,27 +54,28 @@ struct registers_t {
 	uint32_t ecx;
 	uint32_t eax;
 	uint32_t int_no; 	// 中断号
-	uint32_t err_code;  	// 错误代码
-	uint32_t eip;
-	uint32_t cs; 		// 以下由处理器自动压入
+	uint32_t err_code;  	// 错误代码(有中断错误代码的中断会由CPU压入)
+	uint32_t eip;		// 以下由处理器自动压入
+	uint32_t cs; 		
 	uint32_t eflags;
 	uint32_t useresp;
 	uint32_t ss;
-}registers_t;
+} pt_regs;
 
 // 定义中断处理函数指针
-typedef void (*interrupt_handler_t)(registers_t *);
+typedef void (*interrupt_handler_t)(pt_regs *);
 
 // 注册一个中断处理函数
 void register_interrupt_handler(uint8_t n, interrupt_handler_t h);
 
 // 调用中断处理函数
-void idt_handler(registers_t *regs);
+void idt_handler(pt_regs *regs);
 
 // IRQ 处理函数
-void irq_handler(registers_t *regs);
+void irq_handler(pt_regs *regs);
 
-// 声明中断处理函数 0-18 属于 CPU 的异常中断
+// 声明中断处理函数 0-19 属于 CPU 的异常中断
+// ISR:中断服务程序(interrupt service routine)
 void isr0(); 		// 0 #DE 除 0 异常 
 void isr1(); 		// 1 #DB 调试异常 
 void isr2(); 		// 2 NMI 
@@ -109,6 +110,7 @@ void isr28();
 void isr29();
 void isr30();
 void isr31();
+
 // 32～255 用户自定义异常
 void isr255();
 
@@ -131,6 +133,7 @@ void isr255();
 #define  IRQ15    47 	// IDE1 传输控制使用
 
 // 声明 IRQ 函数
+// IRQ:中断请求(Interrupt Request)
 void irq0();		// 电脑系统计时器
 void irq1(); 		// 键盘
 void irq2(); 		// 与 IRQ9 相接，MPU-401 MD 使用

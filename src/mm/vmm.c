@@ -33,7 +33,7 @@ uint32_t *page_tables = (uint32_t *)PAGE_TABLE_VIRTUAL_ADDR;
 page_directory_t *current_directory;
 
 // 页错误中断的函数处理
-void page_fault(registers_t *regs);
+void page_fault(pt_regs *regs);
 
 void init_vmm()
 {
@@ -162,7 +162,7 @@ char get_mapping(uint32_t va, uint32_t *pa)
 	return -1;
 }
 
-void page_fault(registers_t *regs)
+void page_fault(pt_regs *regs)
 {
 	uint32_t cr2;
 	asm volatile ("mov %%cr2, %0" : "=r" (cr2));

@@ -18,7 +18,7 @@ idt_flush:
 [GLOBAL isr%1]
 isr%1:
 	cli                         ; 首先关闭中断
-	push 0                      ; push 错误代码
+	push 0                      ; push 无效的中断错误代码(起到占位作用，便于所有isr函数统一清栈)
 	push %1                     ; push 中断号
 	jmp isr_common_stub
 %endmacro
@@ -42,7 +42,7 @@ ISR_NOERRCODE  5 	; 5 #BR 对数组的引用超出边界
 ISR_NOERRCODE  6 	; 6 #UD 无效或未定义的操作码 
 ISR_NOERRCODE  7 	; 7 #NM 设备不可用(无数学协处理器) 
 ISR_ERRCODE    8 	; 8 #DF 双重故障(有错误代码) 
-ISR_NOERRCODE  9 	; 9 协处理器跨段操作 
+ISR_NOERRCODE  9 	; 9 协处理器跨段操作
 ISR_ERRCODE   10 	; 10 #TS 无效TSS(有错误代码) 
 ISR_ERRCODE   11 	; 11 #NP 段不存在(有错误代码) 
 ISR_ERRCODE   12 	; 12 #SS 栈错误(有错误代码) 
@@ -85,9 +85,9 @@ isr_common_stub:
 	mov gs, ax
 	mov ss, ax
 	
-	push esp    	     
+	push esp		; 此时的 esp 寄存器的值等价于 pt_regs 结构体的指针
 	call idt_handler        ; 在 C 语言代码里
-	add esp, 4 		; 清除registers_t* 参数
+	add esp, 4 		; 清除压入的参数
 	
 	pop ebx                 ; 恢复原来的数据段描述符
 	mov ds, bx

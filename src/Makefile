@@ -19,7 +19,7 @@ LD = ld
 ASM = nasm
 
 C_FLAGS = -c -Wall -m32 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -I include
-LD_FLAGS = -T scripts/kernel.ld -m elf_i386
+LD_FLAGS = -T kernel.ld -m elf_i386
 ASM_FLAGS = -f elf
 
 all: $(S_OBJECTS) $(C_OBJECTS) link
