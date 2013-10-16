@@ -28,6 +28,7 @@
 #include "heap.h"
 #include "thread.h"
 #include "scheduler.h"
+#include "keyboard.h"
 
 // 定义 elf 相关信息数据
 elf_t kernel_elf;
@@ -95,23 +96,31 @@ int hx_main(multiboot_t *mboot_ptr)
 */
 
 	// 初始化内核线程调度
-	init_scheduler(init_threading());
+	//init_scheduler(init_threading());
 	
 	// 申请 1 KB 内存作为内核线程的栈
-	void *thread_stack = kmalloc(0x400);
+	//void *thread_stack = kmalloc(0x400);
 
 	// 创建内核线程，注意栈地址从高往低增长
-	kernel_thread(thread_func, 0, thread_stack + 0x400);
+	//kernel_thread(thread_func, 0, thread_stack + 0x400);
 
 	// 初始化时钟中断
-	init_timer(20);
+	//init_timer(20);
 
+	//printk("Old Thread is it!\n");
+
+	// 初始化键盘驱动
+	init_keyboard_driver();
+	
 	// 解除对 INTR 中断的屏蔽
 	asm volatile("sti");
 
-	printk("Old Thread is it!\n");
-
-	while (1);
+	while (1) {
+		char c = keyboard_getchar();
+		if (c) {
+		      monitor_putc_color(c, rc_black, rc_green);
+		}
+	}
 
 	return 0;
 }
