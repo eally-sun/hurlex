@@ -6,7 +6,6 @@
 ; -------------------------------------------------
 
 [global switch_thread]
-[global _create_thread]
 [extern current_thread]
 [extern thread_exit]
 
@@ -41,3 +40,4 @@ switch_thread:
         popf
         
         ret
+

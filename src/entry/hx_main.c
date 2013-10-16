@@ -35,9 +35,7 @@ elf_t kernel_elf;
 // 内核线程函数
 int thread_func(void *arg)
 {
-	while (1) {
-		printk("B");
-	}
+	printk("New Thread is Running!\n");
 
 	return (int)arg;
 }
@@ -103,7 +101,7 @@ int hx_main(multiboot_t *mboot_ptr)
 	void *thread_stack = kmalloc(0x400);
 
 	// 创建内核线程，注意栈地址从高往低增长
-	kernel_thread(thread_func, 0, thread_stack + 0x3F0);
+	kernel_thread(thread_func, 0, thread_stack + 0x400);
 
 	// 初始化时钟中断
 	init_timer(20);
@@ -111,9 +109,9 @@ int hx_main(multiboot_t *mboot_ptr)
 	// 解除对 INTR 中断的屏蔽
 	asm volatile("sti");
 
-	while (1) {
-		printk("A");
-	}
+	printk("Old Thread is it!\n");
+
+	while (1);
 
 	return 0;
 }

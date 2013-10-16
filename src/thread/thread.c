@@ -31,8 +31,6 @@ uint32_t next_tid = 0;
 // 线程退出
 static void thread_exit();
 
-extern void _create_thread(int (*)(void *), void *, uint32_t *, thread_t *);
-
 thread_t *init_threading()
 {
 	thread_t *thread = kmalloc(sizeof(thread_t));
@@ -47,12 +45,15 @@ thread_t *kernel_thread(int (*fn)(void*), void *arg, uint32_t *stack)
 {
 	thread_t *thread = kmalloc(sizeof(thread_t));
 	bzero(thread, sizeof(thread_t));
-	thread->thread_id = next_tid++;
 
+	thread->thread_id = next_tid++;
+	
+	// 调用线程函数的参数，返回地址(此处为线程退出函数)，以及线程函数函数放置在线程私有栈最高处
 	*(--stack) = (uint32_t)arg;
 	*(--stack) = (uint32_t)&thread_exit;
 	*(--stack) = (uint32_t)fn;
 
+	// 设置新建线程私有栈的起始地址
 	thread->esp = (uint32_t)stack;
 	thread->ebp = 0;
 	thread->eflags = 0x200;
@@ -67,6 +68,6 @@ void thread_exit()
 
 	printk("Thread exited with value %d\n", val);
 
-	while (1);
+	while(1);
 }
 

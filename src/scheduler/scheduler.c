@@ -74,7 +74,7 @@ void thread_not_ready(thread_t *t)
 	}
 }
 
-void schedule ()
+void schedule()
 {
 	// 就绪队列为空就直接返回
 	if (!ready_queue) {
@@ -98,3 +98,4 @@ void schedule ()
 	// 切换到新的线程执行
 	switch_thread(new_thread);
 }
+
