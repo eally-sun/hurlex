@@ -115,10 +115,15 @@ int hx_main(multiboot_t *mboot_ptr)
 	// 解除对 INTR 中断的屏蔽
 	asm volatile("sti");
 
+	char ch;
+	int color = rc_black;
 	while (1) {
-		char c = keyboard_getchar();
-		if (c) {
-		      monitor_putc_color(c, rc_black, rc_green);
+		ch = keyboard_getchar();
+		if (ch) {
+			if (++color == rc_white + 1) {
+				color = rc_black + 1;
+			}
+			monitor_putc_color(ch, rc_black, color);
 		}
 	}
 
