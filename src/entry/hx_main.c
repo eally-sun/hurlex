@@ -123,6 +123,10 @@ int hx_main(multiboot_t *mboot_ptr)
 			if (++color == rc_white + 1) {
 				color = rc_black + 1;
 			}
+			if (ch == '\b') {
+				monitor_putc_color(ch, rc_black, color);
+				monitor_putc_color(' ', rc_black, rc_black);
+			}
 			monitor_putc_color(ch, rc_black, color);
 		}
 	}
