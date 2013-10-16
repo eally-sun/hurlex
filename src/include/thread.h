@@ -38,7 +38,7 @@ struct thread_list;
 thread_t *init_threading();
 
 // 创建内核线程
-thread_t *create_thread(int (*fn)(void*), void *arg, uint32_t *stack);
+thread_t *kernel_thread(int (*fn)(void*), void *arg, uint32_t *stack);
 
 // 切换线程
 void switch_thread(struct thread_list *next);

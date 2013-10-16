@@ -22,36 +22,24 @@ MBOOT_CHECKSUM 		equ 	- (MBOOT_HEADER_MAGIC + MBOOT_HEADER_FLAGS)
 
 ; Multiboot 头的分布必须如下表所示：
 ; ----------------------------------------------------------
-; 偏移量 类型 域名 备注
+; 偏移量  类型  域名        备注
 ;
-; 0  u32  magic  		必需
-; 4  u32  flags  		必需 
-; 8  u32  checksum  		必需 
+;   0     u32   magic       必需
+;   4     u32   flags       必需 
+;   8     u32   checksum    必需 
 ;
-; ----------------- 以下标记我们不使用 ---------------------
-;
-; 12  u32  header_addr 	 	如果flags[16]被置位 
-; 16  u32  load_addr  		如果flags[16]被置位 
-; 20  u32  load_end_addr  	如果flags[16]被置位 
-; 24  u32  bss_end_addr 	如果flags[16]被置位 
-; 28  u32  entry_addr  		如果flags[16]被置位 
-; 32  u32  mode_type  		如果flags[2]被置位 
-; 36  u32  width  		如果flags[2]被置位 
-; 40  u32  height 		如果flags[2]被置位 
-; 44  u32  depth  		如果flags[2]被置位
-;
-; 未完，详细说明请参阅 GNU 相关文档
+; 我们只使用到这些就够了，更多的详细说明请参阅 GNU 相关文档
 ;-----------------------------------------------------------
 
-[BITS 32]  ; 所有代码以 32-bit 的方式编译
+[BITS 32]  	; 所有代码以 32-bit 的方式编译
 
 section .text 	; 代码段从这里开始
 
 ; 在代码段的起始位置设置符合 multiboot 规范的标记
 
-dd MBOOT_HEADER_MAGIC 		; GRUB 会通过这个魔数判断该映像是否支持
-dd MBOOT_HEADER_FLAGS        	; GRUB 的一些加载时选项，其详细注释在定义处
-dd MBOOT_CHECKSUM            	; 检测数值，其含义在定义处
+dd MBOOT_HEADER_MAGIC 	; GRUB 会通过这个魔数判断该映像是否支持
+dd MBOOT_HEADER_FLAGS   ; GRUB 的一些加载时选项，其详细注释在定义处
+dd MBOOT_CHECKSUM       ; 检测数值，其含义在定义处
 
 [GLOBAL start] 		; 内核代码入口，此处提供该声明给 ld 链接器
 [EXTERN hx_main] 	; 声明内核 C 代码的入口函数
@@ -70,7 +58,7 @@ stop:
 .end:
 
 
-section .bss 	; 未初始化的全局变量
+section .bss 		; 未初始化的数据段从这里开始
     resb 32768 		; 这里32KB作为内核栈
 stack:
 

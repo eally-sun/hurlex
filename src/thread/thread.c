@@ -43,7 +43,7 @@ thread_t *init_threading()
 	return thread;
 }
 
-thread_t *create_thread(int (*fn)(void*), void *arg, uint32_t *stack)
+thread_t *kernel_thread(int (*fn)(void*), void *arg, uint32_t *stack)
 {
 	thread_t *thread = kmalloc(sizeof(thread_t));
 	bzero(thread, sizeof(thread_t));
