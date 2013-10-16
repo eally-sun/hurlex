@@ -25,7 +25,8 @@
 #define ELF32_ST_TYPE(i) ((i)&0xf)
 
 // ELF 格式区段头
-typedef struct elf_section_header_t {
+typedef
+struct elf_section_header_t {
   uint32_t name;
   uint32_t type;
   uint32_t flags;
@@ -39,7 +40,8 @@ typedef struct elf_section_header_t {
 } __attribute__((packed)) elf_section_header_t;
 
 // ELF 格式符号
-typedef struct elf_symbol_t {
+typedef
+struct elf_symbol_t {
   uint32_t name;
   uint32_t value;
   uint32_t size;
@@ -49,7 +51,8 @@ typedef struct elf_symbol_t {
 } __attribute__((packed)) elf_symbol_t;
 
 // ELF 信息
-typedef struct elf_t {
+typedef
+struct elf_t {
   elf_symbol_t *symtab;
   uint32_t      symtabsz;
   const char   *strtab;

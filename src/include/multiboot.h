@@ -44,7 +44,8 @@
  *      以下即为这个信息块的结构
  */
 
-typedef struct multiboot_t {
+typedef
+struct multiboot_t {
 	uint32_t flags;			// Multiboot 的版本信息
 	/** 
 	 * 从 BIOS 获知的可用内存
@@ -99,7 +100,8 @@ typedef struct multiboot_t {
  * length_low是内存区域大小的低32位，length_high是内存区域大小的高32位，总共是64位
  * type是相应地址区间的类型，1代表可用RAM，所有其它的值代表保留区域
  */
-typedef struct mmap_entry_t {
+typedef
+struct mmap_entry_t {
 	uint32_t size; 		// 留意 size 是不含 size 自身变量的大小
 	uint32_t base_addr_low;
 	uint32_t base_addr_high;

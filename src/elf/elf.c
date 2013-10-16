@@ -61,3 +61,4 @@ const char *elf_lookup_symbol(uint32_t addr, elf_t *elf)
 
 	return NULL;
 }
+

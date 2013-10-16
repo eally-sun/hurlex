@@ -30,7 +30,8 @@
 #define HEAP_END   0xFF000000
 
 // 内存块管理结构
-typedef struct header {
+typedef
+struct header {
 	struct header *prev; 	// 前后内存块管理结构指针
 	struct header *next;
 	uint32_t allocated : 1;	// 该内存块是否已经被申请

@@ -12,7 +12,7 @@ gdt_flush:
 	lgdt [eax]        ; 加载到 GDTR [修改原先GRUB设置]
 
 	mov ax, 0x10      ; 加载我们的数据段描述符
-	mov ds, ax        ; 加载所有段寄存器
+	mov ds, ax        ; 更新所有可以更新的段寄存器
 	mov es, ax
 	mov fs, ax
 	mov gs, ax

@@ -40,7 +40,7 @@ enum real_color {
 	rc_light_magenta = 13,
 	rc_light_brown  = 14, 	// yellow
 	rc_white = 15
-}real_color_t;
+} real_color_t;
 
 // 清屏操作
 void monitor_clear();

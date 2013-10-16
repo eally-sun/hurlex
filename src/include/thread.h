@@ -21,7 +21,8 @@
 
 #include "common.h"
 
-typedef struct thread_t {
+typedef
+struct thread_t {
 	uint32_t esp;
 	uint32_t ebp;
 	uint32_t ebx;

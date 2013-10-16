@@ -22,7 +22,8 @@
 #include "common.h"
 #include "thread.h"
 
-typedef struct thread_list {
+typedef
+struct thread_list {
 	thread_t *thread;
 	struct thread_list *next;
 } thread_list_t;
