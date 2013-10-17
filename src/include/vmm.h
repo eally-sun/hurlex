@@ -20,6 +20,7 @@
 #define INCLUDE_VMM_H
 
 #include "common.h"
+#include "idt.h"
 
 // 页目录虚拟地址
 #define PAGE_DIR_VIRTUAL_ADDR   	0xFFBFF000
@@ -83,5 +84,8 @@ void unmap(uint32_t va);
 // 如果虚拟地址 va 映射到物理地址则返回 1
 // 同时如果 pa 不是空指针则把物理地址写入 pa 参数
 char get_mapping(uint32_t va, uint32_t *pa);
+
+// 页错误中断的函数处理
+void page_fault(pt_regs *regs);
 
 #endif 	// INCLUDE_VMM_H
